@@ -39,10 +39,10 @@ The Cohort Comparison Tool replaces error‑prone manual checks with a **scalabl
 * **Pandas** for in‑memory diff logic (PoC‑scale).
 
 ```
-┌─────────┐     SQL    ┌─────────────┐
-│Streamlit│  ───────▶  │ Snowflake   │
-│  UI     │  ◀───────  │ (tables)    │
-└─────────┘  DataFrame └─────────────┘
+┌─────────┐     SQL    ┌───────────┐
+│Streamlit│  ───────▶  │ Snowflake │
+│  UI     │  ◀───────  │ (tables)  │
+└─────────┘  DataFrame └───────────┘
 ```
 
 > ⚠️  For large datasets the diff logic should migrate to **Snowpark** or **SQL MERGE** routines; this PoC keeps everything in memory for simplicity.
