@@ -111,6 +111,10 @@ Apache 2.0 (see `LICENSE` file).
 
 * Snowflake Labs Streamlit examples & Udemy courses for initial concept & implementation.
 
+### References:
+#### Snowflake Streamlit courses:
+* [Deep dive into Streamlit, from local web application to Streamlit in Snowflake and Native Apps](https://diaceutics.udemy.com/course/streamlit-for-snowflake/learn/lecture/41406494#overview)
+* [Data Warehousing Workshop (Badge 1)](https://training.snowflake.com/lmt/!clmsLink.dt?site=sf&p_region=uk&lang=en-us&type=O&id=98874317)
 ---
 
 Happy comparing! 🎉
