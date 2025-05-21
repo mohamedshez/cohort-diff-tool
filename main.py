@@ -29,6 +29,10 @@ def main() -> None:
     # Equivalent to running: `streamlit run <app_path>`
     subprocess.run([sys.executable, "-m", "streamlit", "run", str(app_path)])
 
+    # Stop the process cleanly
+    subprocess.run([sys.executable, "-m", "streamlit", "stop"])
+    # st.error("⛔️ Stopped the Streamlit app.")
+
 
 if __name__ == "__main__":
     main()

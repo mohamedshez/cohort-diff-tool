@@ -31,6 +31,20 @@ def init_state():
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
+    # Utility to reset all selection fields
+    def reset_fields():
+        for key in [
+            'selected_database_source','selected_schema_source','selected_table_source',
+            'selected_database_target','selected_schema_target','selected_table_target',
+            'join_key','comparison_ran'
+        ]:
+            st.session_state.pop(key, None)
+        # clear results
+        st.session_state.pop('new_records_df', None)
+        st.session_state.pop('dropped_records_df', None)
+        st.session_state.pop('changed_records_df', None)
+    st.session_state['reset_fields'] = reset_fields
+
     if "sf_conn" not in st.session_state:
         try:
             st.session_state.sf_conn = snowflake.connector.connect(
@@ -45,7 +59,7 @@ def init_state():
             st.warning("🔑 No Snowflake secrets found – add `.streamlit/secrets.toml` and refresh.")
         except Exception as err:
             st.session_state.sf_conn = None
-            st.error(f"❌ Could not connect to Snowflake: {err} or it could be that you may have multiple instances of this app running. Please close all other instances and try again.")
+            st.error(f"❌ Could not connect to Snowflake: {err}. Please close other instances and try again.")
 
 ################################################################################
 # 🧮  Diff helpers
@@ -79,8 +93,7 @@ def compute_diffs(df_base: pd.DataFrame, df_updated: pd.DataFrame, key: str) -> 
 def list_columns(conn, db: str, sch: str, tbl: str) -> List[str]:
     cur = conn.cursor()
     cur.execute(
-        f"SELECT COLUMN_NAME FROM {db}.INFORMATION_SCHEMA.COLUMNS\n"
-        f"WHERE TABLE_SCHEMA='{sch}' AND TABLE_NAME='{tbl}' ORDER BY ORDINAL_POSITION"
+        f"SELECT COLUMN_NAME FROM {db}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='{sch}' AND TABLE_NAME='{tbl}' ORDER BY ORDINAL_POSITION"
     )
     cols = [row[0] for row in cur.fetchall()]
     cur.close()
@@ -102,19 +115,15 @@ def render_sidebar():
         db_src = database_selectbox(st, conn, "selected_database_source")
         sch_list = [] if not db_src else list_schemas(conn, db_src)
         sch_src = st.selectbox(
-            "Schema (source)",
-            options=[""] + sch_list,
+            "Schema (source)", [""] + sch_list,
             index=([""] + sch_list).index(st.session_state.selected_schema_source) if st.session_state.selected_schema_source in sch_list else 0,
-            disabled=not db_src,
-            key="selected_schema_source"
+            disabled=not db_src, key="selected_schema_source"
         )
         tbl_list = [] if not sch_src else list_tables(conn, db_src, sch_src)
         tbl_src = st.selectbox(
-            "Table (source)",
-            options=[""] + tbl_list,
+            "Table (source)", [""] + tbl_list,
             index=([""] + tbl_list).index(st.session_state.selected_table_source) if st.session_state.selected_table_source in tbl_list else 0,
-            disabled=not sch_src,
-            key="selected_table_source"
+            disabled=not sch_src, key="selected_table_source"
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -124,19 +133,15 @@ def render_sidebar():
         db_tgt = database_selectbox(st, conn, "selected_database_target")
         sch_list_t = [] if not db_tgt else list_schemas(conn, db_tgt)
         sch_tgt = st.selectbox(
-            "Schema (target)",
-            options=[""] + sch_list_t,
+            "Schema (target)", [""] + sch_list_t,
             index=([""] + sch_list_t).index(st.session_state.selected_schema_target) if st.session_state.selected_schema_target in sch_list_t else 0,
-            disabled=not db_tgt,
-            key="selected_schema_target"
+            disabled=not db_tgt, key="selected_schema_target"
         )
         tbl_list_t = [] if not sch_tgt else list_tables(conn, db_tgt, sch_tgt)
         tbl_tgt = st.selectbox(
-            "Table (target)",
-            options=[""] + tbl_list_t,
+            "Table (target)", [""] + tbl_list_t,
             index=([""] + tbl_list_t).index(st.session_state.selected_table_target) if st.session_state.selected_table_target in tbl_list_t else 0,
-            disabled=not sch_tgt,
-            key="selected_table_target"
+            disabled=not sch_tgt, key="selected_table_target"
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -145,12 +150,16 @@ def render_sidebar():
         st.header("🔗 Join Key Column")
         join_opts = [] if not tbl_src else list_columns(conn, db_src, sch_src, tbl_src)
         join_key = st.selectbox(
-            "Join key", options=[""] + join_opts,
+            "Join key", [""] + join_opts,
             index=([""] + join_opts).index(st.session_state.join_key) if st.session_state.join_key in join_opts else 0,
-            disabled=not tbl_src,
-            key="join_key"
+            disabled=not tbl_src, key="join_key"
         )
 
+        # Reset button
+        if st.button("🔄 Reset Selections"):
+            st.session_state['reset_fields']()
+
+        # Compare button
         valid = all([db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt, join_key])
         run_btn = st.button("🔍 Compare Tables", disabled=not valid)
 
@@ -217,4 +226,7 @@ def main():
         render_results()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Application interrupted. Exiting...")
