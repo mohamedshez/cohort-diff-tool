@@ -3,12 +3,13 @@ Cohort Comparison Tool PoC 🧬🚀
 Streamlit application for automated comparison of cohort-derived datasets in Snowflake (sidebar layout)
 
 Author : Mohamed Shez
-Created: 2025-05-20 | Updated: 2025-05-21
+Created: 2025-05-20 | Updated: 2025-05-22
 """
 
 import streamlit as st
 import snowflake.connector
 import pandas as pd
+import json
 from typing import Tuple, List, Dict
 from datetime import datetime, timezone
 
@@ -31,18 +32,12 @@ def init_state():
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
-    # Utility to reset all selection fields
     def reset_fields():
-        for key in [
-            'selected_database_source','selected_schema_source','selected_table_source',
-            'selected_database_target','selected_schema_target','selected_table_target',
-            'join_key','comparison_ran'
-        ]:
+        for key in list(defaults.keys()):
             st.session_state.pop(key, None)
         # clear results
-        st.session_state.pop('new_records_df', None)
-        st.session_state.pop('dropped_records_df', None)
-        st.session_state.pop('changed_records_df', None)
+        for k in ['new_records_df','dropped_records_df','changed_records_df']:
+            st.session_state.pop(k, None)
     st.session_state['reset_fields'] = reset_fields
 
     if "sf_conn" not in st.session_state:
@@ -81,7 +76,8 @@ def compute_diffs(df_base: pd.DataFrame, df_updated: pd.DataFrame, key: str) -> 
     ts = datetime.now(timezone.utc).isoformat()
     changed: List[Dict] = []
     for k in base.index.intersection(upd.index):
-        diffs = {c: {"from": base.at[k, c], "to": upd.at[k, c]} for c in df_base.columns if base.at[k, c] != upd.at[k, c]}
+        diffs = {c: {"from": base.at[k, c], "to": upd.at[k, c]}
+                 for c in df_base.columns if base.at[k, c] != upd.at[k, c]}
         if diffs:
             changed.append({"key": k, "timestamp": ts, "changes": diffs})
     return new_df, drop_df, pd.DataFrame(changed)
@@ -93,7 +89,8 @@ def compute_diffs(df_base: pd.DataFrame, df_updated: pd.DataFrame, key: str) -> 
 def list_columns(conn, db: str, sch: str, tbl: str) -> List[str]:
     cur = conn.cursor()
     cur.execute(
-        f"SELECT COLUMN_NAME FROM {db}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='{sch}' AND TABLE_NAME='{tbl}' ORDER BY ORDINAL_POSITION"
+        f"SELECT COLUMN_NAME FROM {db}.INFORMATION_SCHEMA.COLUMNS "
+        f"WHERE TABLE_SCHEMA='{sch}' AND TABLE_NAME='{tbl}' ORDER BY ORDINAL_POSITION"
     )
     cols = [row[0] for row in cur.fetchall()]
     cur.close()
@@ -107,126 +104,106 @@ def render_sidebar():
     conn = st.session_state.sf_conn
     if conn is None:
         st.sidebar.info("🔌 No Snowflake connection. Add secrets and refresh.")
-        return False, (None, None, None, None, None, None)
+        return False, (None,)*6
 
     with st.sidebar:
-        # Source selectors
         st.header("⬇️ Source Table")
         db_src = database_selectbox(st, conn, "selected_database_source")
         sch_list = [] if not db_src else list_schemas(conn, db_src)
-        sch_src = st.selectbox(
-            "Schema (source)", [""] + sch_list,
-            index=([""] + sch_list).index(st.session_state.selected_schema_source) if st.session_state.selected_schema_source in sch_list else 0,
-            disabled=not db_src, key="selected_schema_source"
-        )
+        sch_src = st.selectbox("Schema (source)", [""]+sch_list, disabled=not db_src, key="selected_schema_source")
         tbl_list = [] if not sch_src else list_tables(conn, db_src, sch_src)
-        tbl_src = st.selectbox(
-            "Table (source)", [""] + tbl_list,
-            index=([""] + tbl_list).index(st.session_state.selected_table_source) if st.session_state.selected_table_source in tbl_list else 0,
-            disabled=not sch_src, key="selected_table_source"
-        )
+        tbl_src = st.selectbox("Table (source)", [""]+tbl_list, disabled=not sch_src, key="selected_table_source")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Target selectors
         st.header("🎯 Target Table")
         db_tgt = database_selectbox(st, conn, "selected_database_target")
         sch_list_t = [] if not db_tgt else list_schemas(conn, db_tgt)
-        sch_tgt = st.selectbox(
-            "Schema (target)", [""] + sch_list_t,
-            index=([""] + sch_list_t).index(st.session_state.selected_schema_target) if st.session_state.selected_schema_target in sch_list_t else 0,
-            disabled=not db_tgt, key="selected_schema_target"
-        )
+        sch_tgt = st.selectbox("Schema (target)", [""]+sch_list_t, disabled=not db_tgt, key="selected_schema_target")
         tbl_list_t = [] if not sch_tgt else list_tables(conn, db_tgt, sch_tgt)
-        tbl_tgt = st.selectbox(
-            "Table (target)", [""] + tbl_list_t,
-            index=([""] + tbl_list_t).index(st.session_state.selected_table_target) if st.session_state.selected_table_target in tbl_list_t else 0,
-            disabled=not sch_tgt, key="selected_table_target"
-        )
+        tbl_tgt = st.selectbox("Table (target)", [""]+tbl_list_t, disabled=not sch_tgt, key="selected_table_target")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Join-key dropdown
         st.header("🔗 Join Key Column")
         join_opts = [] if not tbl_src else list_columns(conn, db_src, sch_src, tbl_src)
-        join_key = st.selectbox(
-            "Join key", [""] + join_opts,
-            index=([""] + join_opts).index(st.session_state.join_key) if st.session_state.join_key in join_opts else 0,
-            disabled=not tbl_src, key="join_key"
-        )
+        join_key = st.selectbox("Join key", [""]+join_opts, disabled=not tbl_src, key="join_key")
 
-        # Reset button
         if st.button("🔄 Reset Selections"):
             st.session_state['reset_fields']()
 
-        # Compare button
         valid = all([db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt, join_key])
         run_btn = st.button("🔍 Compare Tables", disabled=not valid)
 
     return run_btn, (db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt)
 
 ################################################################################
+# 🧩  Variant-schema summary
+################################################################################
+
+def variant_summary(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
+    out = []
+    for key in ['PATIENT_ID','NPI']:
+        if key in df1.columns and key in df2.columns:
+            set1, set2 = set(df1[key]), set(df2[key])
+            out.append({
+                'level': key,
+                'new': len(set2 - set1),
+                'dropped': len(set1 - set2),
+                'matched': len(set1 & set2)
+            })
+    return pd.DataFrame(out)
+
+################################################################################
 # 🖼  Main result area
 ################################################################################
 
-def render_results():
+def render_results(variant: bool=False, variant_df=None):
     st.success("Comparison complete!")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("New", len(st.session_state.new_records_df))
-    c2.metric("Dropped", len(st.session_state.dropped_records_df))
-    c3.metric("Changed", len(st.session_state.changed_records_df))
-
-    with st.expander("🆕 New Records"):
-        st.dataframe(st.session_state.new_records_df)
-    with st.expander("🗑️ Dropped Records"):
-        st.dataframe(st.session_state.dropped_records_df)
-    with st.expander("🔄 Changed Records – JSON diffs"):
-        st.json(st.session_state.changed_records_df.to_dict(orient="records"))
+    if variant:
+        st.subheader("Variant-schema Summary")
+        st.dataframe(variant_df)
+        # download summary
+        st.download_button("📥 Download Summary CSV", variant_df.to_csv(index=False), "variant_summary.csv")
+    else:
+        c1,c2,c3 = st.columns(3)
+        c1.metric("New", len(st.session_state.new_records_df))
+        c2.metric("Dropped", len(st.session_state.dropped_records_df))
+        c3.metric("Changed", len(st.session_state.changed_records_df))
+        # downloads
+        st.download_button("📥 Download New CSV", st.session_state.new_records_df.to_csv(index=False), "new_records.csv")
+        st.download_button("📥 Download Dropped CSV", st.session_state.dropped_records_df.to_csv(index=False), "dropped_records.csv")
+        st.download_button("📥 Download Changed JSON", json.dumps(st.session_state.changed_records_df.to_dict(orient='records'), indent=2), "changed_records.json")
+        with st.expander("🆕 New Records"): st.dataframe(st.session_state.new_records_df)
+        with st.expander("🗑️ Dropped Records"): st.dataframe(st.session_state.dropped_records_df)
+        with st.expander("🔄 Changed Records – JSON diffs"): st.json(st.session_state.changed_records_df.to_dict(orient='records'))
 
 ################################################################################
 # 🔗 main
 ################################################################################
 
 def main():
-    st.set_page_config(page_title="Cohort Comparison", page_icon="🧪", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Cohort Comparison", page_icon="🧪", layout="wide")
     st.title("Cohort Comparison Tool – PoC")
 
     init_state()
     run_clicked, ids = render_sidebar()
-
     if run_clicked:
         conn = st.session_state.sf_conn
         dbs, schs, tbls, dbt, scht, tblt = ids
         df_src = fetch_table(conn, dbs, schs, tbls)
         df_tgt = fetch_table(conn, dbt, scht, tblt)
-
-        # quick row-count guard
-        if len(df_src) > MAX_ROWS or len(df_tgt) > MAX_ROWS:
-            st.warning(f"One of the tables exceeds {MAX_ROWS:,} rows; comparison may be slow or fail – aborting.")
-        elif not compare_schemas_strict(df_src, df_tgt):
-            # Detailed schema mismatch error
-            src = f"{dbs}.{schs}.{tbls}"
-            tgt = f"{dbt}.{scht}.{tblt}"
-            st.error("⚠️ Schemas do not match:")
-            st.markdown(
-                f"- **Source**: `{src}`  \n- **Target**: `{tgt}`"
-            )
-            st.error("Please pick tables with identical column names, order and data types.")
-            return
-        else:
+        # row guard
+        if len(df_src)>MAX_ROWS or len(df_tgt)>MAX_ROWS:
+            st.warning(f"Large table (> {MAX_ROWS:,} rows) – may fail.")
+        # strict-schema
+        if compare_schemas_strict(df_src, df_tgt):
             new_df, drop_df, chg_df = compute_diffs(df_src, df_tgt, st.session_state.join_key)
-            st.session_state.update({
-                "new_records_df": new_df,
-                "dropped_records_df": drop_df,
-                "changed_records_df": chg_df,
-                "comparison_ran": True,
-            })
+            st.session_state.update({"new_records_df":new_df,"dropped_records_df":drop_df,"changed_records_df":chg_df})
+            render_results()
+        else:
+            # variant-schema branch
+            var_df = variant_summary(df_src, df_tgt)
+            render_results(variant=True, variant_df=var_df)
 
-    if st.session_state.comparison_ran:
-        render_results()
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("Application interrupted. Exiting...")
+if __name__=="__main__": main()
