@@ -1,226 +1,220 @@
 """
 Cohort Comparison Tool PoC 🧬🚀
-Streamlit application for automated comparison of cohort‑derived datasets in Snowflake
+Streamlit application for automated comparison of cohort-derived datasets in Snowflake (sidebar layout)
 
 Author : Mohamed Shez
-Created: 2025‑05‑20
-Last update: 2025‑05‑20
-
-═══════════════════════════════════════════════════════════════════════════════
-📌  At‑a‑Glance
-───────────────────────────────────────────────────────────────────────────────
-This tool replaces error‑prone manual checks with a scalable, structured
-workflow that detects differences between two cohort‑derived datasets—whether
-they have identical or variant schemas. Analysts can validate cohort changes,
- test logic modifications and build client‑ready diff summaries in seconds.
-
-═══════════════════════════════════════════════════════════════════════════════
-📝  Acceptance Criteria (work‑in‑progress)
-───────────────────────────────────────────────────────────────────────────────
-1️⃣  **Identical Schemas**
-    • Accept two tables with matching column structures.
-    • Report **NEW**, **DROPPED** and **CHANGED** rows.
-    • For changed rows emit a JSON **change_summary** describing column‑level diffs.
-
-2️⃣  **Different Schemas**
-    • Accept tables with differing structures.
-    • Produce patient‑level and NPI‑level difference summaries plus overall
-      match counts.
-
-3️⃣  **File‑level Summary**
-    • If **PATIENT_ID** present → summarise new / dropped / matched patients.
-    • If **NPI** present       → summarise new / dropped / matched NPIs.
-
-4️⃣  **Usability & Outputs**
-    • Flag schema mismatches clearly.
-    • Show analyst‑friendly summaries and optional machine‑readable JSON diff logs.
-    • Format output for downstream validation dashboards / approval workflows.
-
-5️⃣  **Non‑functional (draft)**
-    • Compare up to **X** rows within **X** minutes (TBC).
-    • Log and surface malformed input or missing‑field errors.
-
-═══════════════════════════════════════════════════════════════════════════════
+Created: 2025-05-20 | Updated: 2025-05-21
 """
 
 import streamlit as st
 import snowflake.connector
 import pandas as pd
 from typing import Tuple, List, Dict
-import json
+from datetime import datetime, timezone
+
+from utils_selects import database_selectbox, list_tables, list_schemas
+
+MAX_ROWS = 100_000  # PoC guard
 
 ################################################################################
-# 🎨  Session‑state helpers & theming
+# 🎨  Session / connection
 ################################################################################
 
-def initialize_session_state() -> None:
-    """Populate `st.session_state` with all keys we rely on, only once."""
-
-    # Brand colours that pages can reuse
-    st.session_state.card_bg_color   = st.session_state.get("card_bg_color",   "#eceff1")
-    st.session_state.header_bg_color = st.session_state.get("header_bg_color", "#37474f")
-
-    # Core selections / cache containers – trimmed for comparison use‑case
-    default_keys = dict(
-        selected_database_source   = "",
-        selected_schema_source     = "",
-        selected_table_source      = "",
-        selected_database_target   = "",
-        selected_schema_target     = "",
-        selected_table_target      = "",
-        join_key                   = "",
-        new_records_df             = pd.DataFrame(),
-        dropped_records_df         = pd.DataFrame(),
-        changed_records_df         = pd.DataFrame(),
-        comparison_ran             = False,
+def init_state():
+    defaults = dict(
+        selected_database_source="", selected_schema_source="", selected_table_source="",
+        selected_database_target="", selected_schema_target="", selected_table_target="",
+        join_key="",
+        new_records_df=pd.DataFrame(), dropped_records_df=pd.DataFrame(), changed_records_df=pd.DataFrame(),
+        comparison_ran=False,
     )
-
-    for k, v in default_keys.items():
+    for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
-################################################################################
-# 🔌  Snowflake connection helpers
-################################################################################
+    if "sf_conn" not in st.session_state:
+        try:
+            st.session_state.sf_conn = snowflake.connector.connect(
+                user=st.secrets["snowflake"]["user"],
+                password=st.secrets["snowflake"]["password"],
+                account=st.secrets["snowflake"]["account"],
+                warehouse=st.secrets["snowflake"]["warehouse"],
+                role=st.secrets["snowflake"]["role"],
+            )
+        except st.runtime.secrets.StreamlitSecretNotFoundError:
+            st.session_state.sf_conn = None
+            st.warning("🔑 No Snowflake secrets found – add `.streamlit/secrets.toml` and refresh.")
+        except Exception as err:
+            st.session_state.sf_conn = None
+            st.error(f"❌ Could not connect to Snowflake: {err} or it could be that you may have multiple instances of this app running. Please close all other instances and try again.")
 
-def get_connection():
-    """Establish a connection to Snowflake using Streamlit secrets."""
-    return snowflake.connector.connect(
-        user      = st.secrets["snowflake"]["user"],
-        password  = st.secrets["snowflake"]["password"],
-        account   = st.secrets["snowflake"]["account"],
-        warehouse = st.secrets["snowflake"]["warehouse"],
-        role      = st.secrets["snowflake"]["role"],
-    )
-
 ################################################################################
-# 🧮  Core comparison utilities
+# 🧮  Diff helpers
 ################################################################################
 
 @st.cache_data(show_spinner=False)
-def fetch_table(conn, database: str, schema: str, table: str) -> pd.DataFrame:
-    """Pull a full table into a DataFrame (PoC scale only)."""
-    query = f"SELECT * FROM {database}.{schema}.{table}"
-    return pd.read_sql(query, conn)
+def fetch_table(_conn, db: str, sch: str, tbl: str) -> pd.DataFrame:
+    return pd.read_sql(f"SELECT * FROM {db}.{sch}.{tbl}", _conn)
 
 @st.cache_data(show_spinner=False)
-def compare_schemas(df1: pd.DataFrame, df2: pd.DataFrame) -> bool:
-    """Return *True* if column orders & names match exactly."""
-    return list(df1.columns) == list(df2.columns)
+def compare_schemas_strict(df1: pd.DataFrame, df2: pd.DataFrame) -> bool:
+    return list(df1.columns) == list(df2.columns) and all(df1.dtypes.values == df2.dtypes.values)
 
 @st.cache_data(show_spinner=False)
-def compute_diffs(
-    df_base: pd.DataFrame,
-    df_updated: pd.DataFrame,
-    key: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Return new, dropped, and changed record DataFrames."""
-
-    base    = df_base.set_index(key)
-    updated = df_updated.set_index(key)
-
-    new_records      = updated.loc[updated.index.difference(base.index)].reset_index()
-    dropped_records  = base.loc[base.index.difference(updated.index)].reset_index()
-
-    # Changed rows: iterate common keys once
-    changed: List[Dict[str, Dict[str, Dict[str, str]]]] = []
-    for k in base.index.intersection(updated.index):
-        row_base    = base.loc[k]
-        row_updated = updated.loc[k]
-        diffs = {
-            col: {"from": row_base[col], "to": row_updated[col]}
-            for col in df_base.columns
-            if row_base[col] != row_updated[col]
-        }
+def compute_diffs(df_base: pd.DataFrame, df_updated: pd.DataFrame, key: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    base, upd = df_base.set_index(key), df_updated.set_index(key)
+    new_df  = upd.loc[upd.index.difference(base.index)].reset_index()
+    drop_df = base.loc[base.index.difference(upd.index)].reset_index()
+    ts = datetime.now(timezone.utc).isoformat()
+    changed: List[Dict] = []
+    for k in base.index.intersection(upd.index):
+        diffs = {c: {"from": base.at[k, c], "to": upd.at[k, c]} for c in df_base.columns if base.at[k, c] != upd.at[k, c]}
         if diffs:
-            changed.append({"key": k, "changes": diffs})
+            changed.append({"key": k, "timestamp": ts, "changes": diffs})
+    return new_df, drop_df, pd.DataFrame(changed)
 
-    changed_records = pd.DataFrame(changed)
-    return new_records, dropped_records, changed_records
+# ---------------------------------------------------------------------------
+# Column list for join-key dropdown
+# ---------------------------------------------------------------------------
 
-################################################################################
-# 🏠  Main Streamlit application
-################################################################################
-
-def main():
-    # Page config & session bootstrap
-    st.set_page_config(
-        page_title="Cohort Comparison",
-        page_icon="🧪",
-        layout="wide",
-        initial_sidebar_state="expanded",
+def list_columns(conn, db: str, sch: str, tbl: str) -> List[str]:
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT COLUMN_NAME FROM {db}.INFORMATION_SCHEMA.COLUMNS\n"
+        f"WHERE TABLE_SCHEMA='{sch}' AND TABLE_NAME='{tbl}' ORDER BY ORDINAL_POSITION"
     )
+    cols = [row[0] for row in cur.fetchall()]
+    cur.close()
+    return cols
 
-    initialize_session_state()
+################################################################################
+# 🖥️  Sidebar input panel
+################################################################################
 
-    st.title("Cohort Comparison Tool – PoC")
+def render_sidebar():
+    conn = st.session_state.sf_conn
+    if conn is None:
+        st.sidebar.info("🔌 No Snowflake connection. Add secrets and refresh.")
+        return False, (None, None, None, None, None, None)
 
-    # Sidebar – table selectors
     with st.sidebar:
-        st.header("Source Table ⬇️")
-        st.session_state.selected_database_source = st.text_input("Database (source)",  value=st.session_state.selected_database_source)
-        st.session_state.selected_schema_source   = st.text_input("Schema (source)",    value=st.session_state.selected_schema_source)
-        st.session_state.selected_table_source    = st.text_input("Table (source)",     value=st.session_state.selected_table_source)
+        # Source selectors
+        st.header("⬇️ Source Table")
+        db_src = database_selectbox(st, conn, "selected_database_source")
+        sch_list = [] if not db_src else list_schemas(conn, db_src)
+        sch_src = st.selectbox(
+            "Schema (source)",
+            options=[""] + sch_list,
+            index=([""] + sch_list).index(st.session_state.selected_schema_source) if st.session_state.selected_schema_source in sch_list else 0,
+            disabled=not db_src,
+            key="selected_schema_source"
+        )
+        tbl_list = [] if not sch_src else list_tables(conn, db_src, sch_src)
+        tbl_src = st.selectbox(
+            "Table (source)",
+            options=[""] + tbl_list,
+            index=([""] + tbl_list).index(st.session_state.selected_table_source) if st.session_state.selected_table_source in tbl_list else 0,
+            disabled=not sch_src,
+            key="selected_table_source"
+        )
 
-        st.header("Target Table ⬆️")
-        st.session_state.selected_database_target = st.text_input("Database (target)",  value=st.session_state.selected_database_target)
-        st.session_state.selected_schema_target   = st.text_input("Schema (target)",    value=st.session_state.selected_schema_target)
-        st.session_state.selected_table_target    = st.text_input("Table (target)",     value=st.session_state.selected_table_target)
+        st.markdown("<br>", unsafe_allow_html=True)
 
-        st.session_state.join_key = st.text_input("Join Key Column", value=st.session_state.join_key)
+        # Target selectors
+        st.header("🎯 Target Table")
+        db_tgt = database_selectbox(st, conn, "selected_database_target")
+        sch_list_t = [] if not db_tgt else list_schemas(conn, db_tgt)
+        sch_tgt = st.selectbox(
+            "Schema (target)",
+            options=[""] + sch_list_t,
+            index=([""] + sch_list_t).index(st.session_state.selected_schema_target) if st.session_state.selected_schema_target in sch_list_t else 0,
+            disabled=not db_tgt,
+            key="selected_schema_target"
+        )
+        tbl_list_t = [] if not sch_tgt else list_tables(conn, db_tgt, sch_tgt)
+        tbl_tgt = st.selectbox(
+            "Table (target)",
+            options=[""] + tbl_list_t,
+            index=([""] + tbl_list_t).index(st.session_state.selected_table_target) if st.session_state.selected_table_target in tbl_list_t else 0,
+            disabled=not sch_tgt,
+            key="selected_table_target"
+        )
 
-        compare_btn = st.button("🔍 Compare Tables")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-    # Main panel – run comparison when clicked
-    if compare_btn:
-        if not st.session_state.join_key:
-            st.error("❌ Please specify a join key column.")
-            st.stop()
+        # Join-key dropdown
+        st.header("🔗 Join Key Column")
+        join_opts = [] if not tbl_src else list_columns(conn, db_src, sch_src, tbl_src)
+        join_key = st.selectbox(
+            "Join key", options=[""] + join_opts,
+            index=([""] + join_opts).index(st.session_state.join_key) if st.session_state.join_key in join_opts else 0,
+            disabled=not tbl_src,
+            key="join_key"
+        )
 
-        with st.spinner("Connecting to Snowflake and fetching tables …"):
-            conn = get_connection()
-            df_source = fetch_table(conn,
-                                    st.session_state.selected_database_source,
-                                    st.session_state.selected_schema_source,
-                                    st.session_state.selected_table_source)
-            df_target = fetch_table(conn,
-                                    st.session_state.selected_database_target,
-                                    st.session_state.selected_schema_target,
-                                    st.session_state.selected_table_target)
+        valid = all([db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt, join_key])
+        run_btn = st.button("🔍 Compare Tables", disabled=not valid)
 
-        if not compare_schemas(df_source, df_target):
-            st.error("⚠️ Schemas do not match. Please select tables with identical structures.")
-            st.stop()
+    return run_btn, (db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt)
 
-        new_df, dropped_df, changed_df = compute_diffs(df_source, df_target, st.session_state.join_key)
+################################################################################
+# 🖼  Main result area
+################################################################################
 
-        st.success("✅ Comparison complete!")
+def render_results():
+    st.success("Comparison complete!")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("New", len(st.session_state.new_records_df))
+    c2.metric("Dropped", len(st.session_state.dropped_records_df))
+    c3.metric("Changed", len(st.session_state.changed_records_df))
 
-        st.session_state.new_records_df     = new_df
-        st.session_state.dropped_records_df = dropped_df
-        st.session_state.changed_records_df = changed_df
-        st.session_state.comparison_ran     = True
-
-    # Display results if available
-    if st.session_state.comparison_ran:
-        st.subheader("📈 Summary")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("New Records",      len(st.session_state.new_records_df))
-        col2.metric("Dropped Records",  len(st.session_state.dropped_records_df))
-        col3.metric("Changed Records",  len(st.session_state.changed_records_df))
-
-        st.markdown("---")
-        st.subheader("🆕 New Records")
+    with st.expander("🆕 New Records"):
         st.dataframe(st.session_state.new_records_df)
-
-        st.subheader("🗑️ Dropped Records")
+    with st.expander("🗑️ Dropped Records"):
         st.dataframe(st.session_state.dropped_records_df)
-
-        st.subheader("🔄 Changed Records – JSON Diffs")
+    with st.expander("🔄 Changed Records – JSON diffs"):
         st.json(st.session_state.changed_records_df.to_dict(orient="records"))
 
 ################################################################################
-# 🚀  Script entry‑point
+# 🔗 main
 ################################################################################
+
+def main():
+    st.set_page_config(page_title="Cohort Comparison", page_icon="🧪", layout="wide", initial_sidebar_state="expanded")
+    st.title("Cohort Comparison Tool – PoC")
+
+    init_state()
+    run_clicked, ids = render_sidebar()
+
+    if run_clicked:
+        conn = st.session_state.sf_conn
+        dbs, schs, tbls, dbt, scht, tblt = ids
+        df_src = fetch_table(conn, dbs, schs, tbls)
+        df_tgt = fetch_table(conn, dbt, scht, tblt)
+
+        # quick row-count guard
+        if len(df_src) > MAX_ROWS or len(df_tgt) > MAX_ROWS:
+            st.warning(f"One of the tables exceeds {MAX_ROWS:,} rows; comparison may be slow or fail – aborting.")
+        elif not compare_schemas_strict(df_src, df_tgt):
+            # Detailed schema mismatch error
+            src = f"{dbs}.{schs}.{tbls}"
+            tgt = f"{dbt}.{scht}.{tblt}"
+            st.error("⚠️ Schemas do not match:")
+            st.markdown(
+                f"- **Source**: `{src}`  \n- **Target**: `{tgt}`"
+            )
+            st.error("Please pick tables with identical column names, order and data types.")
+            return
+        else:
+            new_df, drop_df, chg_df = compute_diffs(df_src, df_tgt, st.session_state.join_key)
+            st.session_state.update({
+                "new_records_df": new_df,
+                "dropped_records_df": drop_df,
+                "changed_records_df": chg_df,
+                "comparison_ran": True,
+            })
+
+    if st.session_state.comparison_ran:
+        render_results()
 
 if __name__ == "__main__":
     main()
