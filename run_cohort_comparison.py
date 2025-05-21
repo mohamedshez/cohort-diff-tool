@@ -7,6 +7,11 @@ Created: 2025-05-20 | Updated: 2025-05-22
 """
 
 import streamlit as st
+import warnings
+# suppress pandas DBAPI warning about non-SQLAlchemy connections
+warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy connectable.*')
+# suppress pyarrow version compatibility warning from Snowflake connector
+warnings.filterwarnings('ignore', message='You have an incompatible version of \'pyarrow\' installed.*')
 import snowflake.connector
 import pandas as pd
 import json
