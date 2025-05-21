@@ -1,120 +1,92 @@
 # Cohort Diff Tool PoC 🧬🚀
 
 Streamlit application for automated comparison of cohort‑derived datasets in Snowflake.
-#### Inspired and Built from cohort-builder example - https://github.com/Snowflake-Labs/sfguide-cohort-builder
 
-* **Author**: Mohamed Shez (SWE)
-* **Created**: 20‑May‑2025
-* **Last updated**: 20‑May‑2025
-* **Version**: 0.1.0
-* **Status**: PoC (Proof of Concept)
-* **License**: Apache 2.0
-* **Contact**:
-* * GitHub - (https://github.com/shez1461)
+**Author**  Mohamed Shez   |   **Created** 20‑May‑2025   |   **Last updated** 21‑May‑2025
 
 ---
-
 ## 📌 At‑a‑Glance
-
-The Cohort Comparison Tool replaces error‑prone manual checks with a **scalable, structured workflow** that detects differences between two cohort‑derived datasets—whether they have **identical or variant schemas**. Analysts can validate cohort changes, test logic modifications and build client‑ready diff summaries in seconds.
-
----
-
-## 📝 Acceptance Criteria
-
-| #   | Category               | Requirement                                                                                                                                                                                         |
-| --- |------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1️⃣ | Identical Schemas      | • Accept two tables with matching column structures  <br>• Report **NEW**, **DROPPED** and **CHANGED** rows  <br>• Emit JSON `change_summary` for changed rows                                      |
-| 2️⃣ | Different Schemas      | • Accept tables with differing structures  <br>• Produce **stock‑level** and **NPI‑level** difference summaries plus overall match counts                                                         |
-| 3️⃣ | File‑level Summary     | • If `STOCK_ID` present → summarise **new / dropped / matched stocks**  <br>• If `UUID` present → summarise **new / dropped / matched UUIDs**                                                       |
-| 4️⃣ | Usability & Outputs    | • Flag schema mismatches clearly  <br>• Show analyst‑friendly summaries and optional machine‑readable JSON diff logs  <br>• Format output for downstream validation dashboards / approval workflows |
-| 5️⃣ | Non‑functional (draft) | • Compare up to **X** rows within **X** minutes (TBC)  <br>• Log and surface malformed input or missing‑field errors                                                                                |
+A lightweight tool that spots **NEW**, **DROPPED** and **CHANGED** rows between two Snowflake tables that **share identical columns and data‑types**. Diff results include per‑record JSON change summaries stamped with UTC timestamps, ready for analyst validation or audit trails.
 
 ---
+## 📝 Acceptance Criteria (PoC scope)
+| # | Requirement                                                                         |
+|---|-------------------------------------------------------------------------------------|
+|1️⃣| Accept two tables with matching column **names, order _and_ dtypes**                |
+|   | Detect <br>• New records <br>• Dropped records <br>• Changed records (column‑level) |
+|   | Emit `change_summary` JSON **+ timestamp** for each changed record                  |
+|2️⃣| Schema‑mismatch → clear error message, halt processing                              |
+|3️⃣| Wizard UI (3 steps: Source ▸ Target ▸ Review) matches internal style                |
+|4️⃣| On‑screen results only (no export)                                                  |
+|5️⃣| Warn if either table > **100 000 rows** (PoC memory guard)                          |
 
+---
 ## 🏗️ Architecture
-
-* **Streamlit** front‑end (runs inside Snowflake Native Apps *or* locally).
-* **Snowflake** back‑end for data retrieval and compute.
-* **Pandas** for in‑memory diff logic (PoC‑scale).
-
 ```
 ┌─────────┐     SQL    ┌───────────┐
 │Streamlit│  ───────▶  │ Snowflake │
 │  UI     │  ◀───────  │ (tables)  │
 └─────────┘  DataFrame └───────────┘
-```
 
-> ⚠️  For large datasets the diff logic should migrate to **Snowpark** or **SQL MERGE** routines; this PoC keeps everything in memory for simplicity.
+IntelliJ ▶︎ run_cohort_comparison.py ─┐
+                                     ▼
+    streamlit_snowflake_poc.py (UI) — utils (diff logic)
+                                     ▼
+                               Snowflake tables
+```
+* **Streamlit** front‑end with a simple step wizard.
+* **Pandas** in‑memory diff (good up to ~500k rows). Upgrade to Snowpark for large prod tables.
 
 ---
+## 🚀 Quick Start (local)
+```bash
+# 1. Clone / open the project in IntelliJ or PyCharm
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt  # streamlit, snowflake-connector-python, pandas
 
-## 🚀 Quick Start
-
-### 1 ‑ Prerequisites
-
-* Python `3.9+`
-* `pip install -r requirements.txt`
-* Snowflake account with a role that can `SELECT` the tables you plan to compare.
-
-### 2 ‑ Configure Secrets
-
-Create a `.streamlit/secrets.toml` (local) or use Snowflake secret manager (native app):
-
+# 2. Configure Snowflake credentials
+mkdir -p .streamlit && nano .streamlit/secrets.toml
+```
 ```toml
 [snowflake]
 user = "YOUR_USER"
 password = "YOUR_PASSWORD"
 account = "YOUR_ACCOUNT"
-warehouse = "YOUR_WAREHOUSE"
-role = "YOUR_ROLE"
+warehouse = "YOUR_WH"
+role = "DXRX_DEVELOPER"
 ```
-
-### 3 ‑ Run Locally
-
 ```bash
-streamlit run cohort_diff_app.py
+# 3. Launch via helper script
+python run_cohort_comparison.py
+```
+Open the printed `http://localhost:8501` link → follow the wizard.
+
+---
+## 🖥️ Usage Flow
+1. **Step 1 – Source**: pick database / schema / table.  
+2. **Step 2 – Target**: pick second table + join key.  
+3. **Step 3 – Review**: verify selections ➜ **Run Comparison**.  
+4. Expand result panels to inspect diffs.
+
+---
+## 🔄 Change Summary Example
+```json
+{
+  "key": "12345",
+  "timestamp": "2025-05-21T12:34:56.789Z",
+  "changes": {
+    "GENDER": {"from": "M", "to": "F"},
+    "AGE":     {"from": 45,  "to": 46}
+  }
+}
 ```
 
-### 4 ‑ Run Inside Snowflake
-
-1. Upload `cohort_diff_app.py` to the Snowflake **/app** directory.
-2. Create a Streamlit app in the Snowflake UI and point it to the script.
+---
+## ✨ Extending This PoC
+* **Schema‑variant support** – intersect/union column sets, pad NULLs.
+* **Large datasets** – push diff to Snowpark UDF or SQL MERGE.
+* **Exports** – add CSV / JSON download buttons or write tables back to Snowflake.
 
 ---
-
-## 🖥️ Usage
-
-1. **Select source & target tables** (can be in different databases/schemas).
-2. Enter the **join key** (e.g. `STOCK_ID`).
-3. Click **🔍 Compare Tables**.
-4. Review the **Summary metrics** and explore **New**, **Dropped**, and **Changed** record tabs.
-5. Copy or download the JSON diff logs for downstream validation.
-
----
-
-## 🧩 Extending This PoC
-
-* **Schema‑variant comparison** – switch to column‑set intersection & union logic.
-* **Large‑scale data** – push diff computation into Snowpark UDFs / JavaScript.
-* **Export options** – write diff outputs back to Snowflake tables or S3 as Parquet.
-
----
-
-## 📄 License
-
-Apache 2.0 (see `LICENSE` file).
-
----
-
-## 🙏 Acknowledgements
-
-* Snowflake Labs Streamlit examples & Udemy courses for initial concept & implementation.
-
-### References:
-#### Snowflake Streamlit courses:
-* [Deep dive into Streamlit, from local web application to Streamlit in Snowflake and Native Apps](https://diaceutics.udemy.com/course/streamlit-for-snowflake/learn/lecture/41406494#overview)
-* [Data Warehousing Workshop (Badge 1)](https://training.snowflake.com/lmt/!clmsLink.dt?site=sf&p_region=uk&lang=en-us&type=O&id=98874317)
----
-
-Happy comparing! 🎉
+## License
+Apache 2.0
