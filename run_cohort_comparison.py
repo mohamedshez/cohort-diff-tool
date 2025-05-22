@@ -56,7 +56,7 @@ def init_state():
             )
         except st.runtime.secrets.StreamlitSecretNotFoundError:
             st.session_state.sf_conn = None
-            st.warning("🔑 No Snowflake secrets found – add `.streamlit/secrets.toml` and refresh.")
+            st.warning("⚠️ 🔑 No Snowflake secrets found – add `.streamlit/secrets.toml` and refresh.")
         except Exception as err:
             st.session_state.sf_conn = None
             st.error(f"❌ Could not connect to Snowflake: {err}. Please close other instances and try again.")
@@ -164,7 +164,7 @@ def variant_summary(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.DataFrame:
 ################################################################################
 
 def render_results(variant: bool=False, variant_df=None):
-    st.success("Comparison complete!")
+    st.success("✅ Comparison complete!")
     if variant:
         st.subheader("Variant-schema Summary")
         st.dataframe(variant_df)
@@ -200,7 +200,7 @@ def main():
         df_tgt = fetch_table(conn, dbt, scht, tblt)
         # row guard
         if len(df_src)>MAX_ROWS or len(df_tgt)>MAX_ROWS:
-            st.warning(f"Large table (> {MAX_ROWS:,} rows) – may fail.")
+            st.warning(f"⚠️ Large table (> {MAX_ROWS:,} rows) – may fail.")
         # strict-schema
         if compare_schemas_strict(df_src, df_tgt):
             new_df, drop_df, chg_df = compute_diffs(df_src, df_tgt, st.session_state.join_key)
