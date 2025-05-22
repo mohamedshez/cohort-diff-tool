@@ -277,11 +277,11 @@ def main() -> None:
     clicked, ids = render_sidebar()
 
     # Display helper text in main area before comparison
-    if not st.session_state.comparison_ran:
+    if not st.session_state.get("comparison_ran", False):
         st.markdown(
             """
-            **At a Glance**  
-            • Select your **Source Table** by choosing Database → Schema → Table.  
+            **At a Glance:**  
+            • Select your **Source Table** by choosing `Database` → `Schema` → `Table`.  
             • Select your **Target Table** similarly.  
             • Pick a **Join Key** column that uniquely identifies rows in both tables.  
             • Click **Compare Tables** to compute and display:  
