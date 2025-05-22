@@ -132,7 +132,7 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
 
     with st.sidebar:
         # Display logo above sidebar
-        # st.image("your_logo.png", use_container_width=True)
+        # st.image("your_logo.png", width=100)
 
         # Source Table
         st.header("⬇️ Source Table")
@@ -273,6 +273,7 @@ def main() -> None:
         df_target = fetch_table(sess, dt, stgt, tgt)
         if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
             st.warning(f"⚠️ Large (> {MAX_ROWS:,}) may take a while to process. Please be patient while we compute the diffs – performance may suffer.")
+
             st.info("❗️ Limited to 1k rows for this POC.")
         try:
             new_df, drop_df, change_df = compute_diffs(
