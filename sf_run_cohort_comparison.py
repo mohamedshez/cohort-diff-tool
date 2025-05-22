@@ -81,9 +81,9 @@ def compute_diffs(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Row-level diff: new, dropped, and changed DataFrames."""
     if key not in df_base.columns or key not in df_updated.columns:
-        raise ValueError(f"Join key '{key}' missing from one of the tables.")
+        raise ValueError(f"❌ Join key '{key}' missing from one of the tables.")
     if df_base[key].duplicated().any() or df_updated[key].duplicated().any():
-        raise ValueError(f"Join key '{key}' must be unique in both tables.")
+        raise ValueError(f"❌ Join key '{key}' must be unique in both tables.")
     base = df_base.set_index(key)
     upd = df_updated.set_index(key)
     new_df = upd.loc[upd.index.difference(base.index)].reset_index()
@@ -126,13 +126,19 @@ def summarize_column_diffs(
 def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
     """Render sidebar selects using Snowpark session only."""
     sess = st.session_state.session
+    # If no Snowpark session, show error and exit
     if sess is None:
-        st.sidebar.error("🔌 No Snowpark session; initialize connection.")
+        st.sidebar.error("⛔️🔌 No Snowpark session; initialize connection.")
         return False, ("",)*6
 
     with st.sidebar:
-        # Display logo above sidebar
-        # st.image("your_logo.png", width=100)
+        # Display logo above sidebar via binary to avoid file path issues
+        try:
+            with open("logo.png", "rb") as img_file:
+                img_bytes = img_file.read()
+            st.image(img_bytes, width=100)
+        except Exception:
+            st.warning("⚠️ Logo not found or cannot be loaded.")
 
         # Source Table
         st.header("⬇️ Source Table")
@@ -185,6 +191,7 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
 
         # Join Key Column
         st.header("🔗 Join Key Column")
+        st.caption("Select the unique key column used to match records between source and target. This must be non-null and unique.")
         cols = []
         if db_src and sch_src and tsrc:
             cols = [row[0] for row in sess.sql(
@@ -200,9 +207,11 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
             disabled=len(opts) <= 1
         )
 
-        # Reset & Run
+        # Reset All Selections
         if st.button("🔄 Reset All"):
             st.session_state.reset_all()
+
+        # Compare action button
         valid = all([db_src, sch_src, tsrc, db_tgt, sch_tgt, tgt, jk])
         run_btn = st.button("🔍 Compare Tables", disabled=not valid)
 
@@ -260,21 +269,50 @@ def render_results() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Cohort Comparison Tool", page_icon="🧪", layout="wide")
-    st.title("Cohort Comparison Tool")
+    st.title("Cohort Comparison Tool – PoC")
+
     init_state()
+
+    # Always render sidebar for source/target selection
     clicked, ids = render_sidebar()
+
+    # Display helper text in main area before comparison
+    if not st.session_state.comparison_ran:
+        st.markdown(
+            """
+            **At a Glance**  
+            • Select your **Source Table** by choosing Database → Schema → Table.  
+            • Select your **Target Table** similarly.  
+            • Pick a **Join Key** column that uniquely identifies rows in both tables.  
+            • Click **Compare Tables** to compute and display:  
+              - New records  
+              - Dropped records  
+              - Changed records with a **JSON change summary**
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Exit early if sidebar not fully configured
     if not clicked:
         return
+
     ds, ss, tsrc, dt, stgt, tgt = ids
     sess = st.session_state.session
+
     # Fetch & compute diffs with user feedback spinner
     with st.spinner("🔄 Fetching & computing diffs…"):
         df_base = fetch_table(sess, ds, ss, tsrc)
         df_target = fetch_table(sess, dt, stgt, tgt)
-        if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
-            st.warning(f"⚠️ Large (> {MAX_ROWS:,}) may take a while to process. Please be patient while we compute the diffs – performance may suffer.")
 
-            st.info("❗️ Limited to 1k rows for this POC.")
+        # Schema validation: must match exact schemas to proceed
+        if not compare_schemas_strict(df_base, df_target):
+            st.error("❌ Table schemas do not match exactly. Please select tables with identical schemas before comparing.")
+            return
+
+        if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
+            st.warning(f"⚠️ Large (> {MAX_ROWS:,}) may take a while—please be patient.")
+            st.info("❗️ Limited to 1k rows for this PoC.")
+
         try:
             new_df, drop_df, change_df = compute_diffs(
                 df_base, df_target, st.session_state.join_key
@@ -285,11 +323,13 @@ def main() -> None:
         except ValueError as e:
             st.error(f"❌ {e}")
             return
+
         st.session_state.column_diff_summary = summarize_column_diffs(
             df_base, df_target
         )
         st.session_state.comparison_ran = True
-        # Render after spinner completes
+
+    # Render after spinner completes
     render_results()
 
 if __name__ == "__main__":
