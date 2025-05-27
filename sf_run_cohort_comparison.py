@@ -31,7 +31,7 @@ MAX_ROWS = 10_000  # Limit to 10k rows
 ################################################################################
 
 def init_state() -> None:
-    """Initialize session state and Snowpark session."""
+    """Initialise session state and Snowpark session."""
     defaults: Dict[str, object] = dict(
         selected_database_source="",
         selected_schema_source="",
@@ -50,7 +50,7 @@ def init_state() -> None:
         st.session_state.setdefault(k, v)
 
     def reset_all() -> None:
-        """Clear user selections and results, then reinitialize comparison_ran."""
+        """Clear user selections and results, then reinitialise comparison_ran."""
         for key in defaults.keys():
             st.session_state.pop(key, None)
         # Ensure comparison_ran exists to avoid missing attribute
@@ -66,19 +66,19 @@ def init_state() -> None:
 # 🗄 Data access & diff utilities
 ################################################################################
 
-@st.cache_data(show_spinner=False)
+# @st.cache_data(show_spinner=False)
 def fetch_table(_sess, db: str, sch: str, tbl: str) -> pd.DataFrame:
     """Load table via Snowpark into a pandas DataFrame."""
     return _sess.sql(f"SELECT * FROM {db}.{sch}.{tbl}").to_pandas()
 
-@st.cache_data(show_spinner=False)
+# @st.cache_data(show_spinner=False)
 def compare_schemas_strict(df1: pd.DataFrame, df2: pd.DataFrame) -> bool:
     """Return True if columns and dtypes match exactly."""
     return list(df1.columns) == list(df2.columns) and all(
         df1.dtypes.values == df2.dtypes.values
     )
 
-@st.cache_data(show_spinner=False)
+# @st.cache_data(show_spinner=False)
 def compute_diffs(
     df_base: pd.DataFrame, df_updated: pd.DataFrame, key: str
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -103,8 +103,8 @@ def compute_diffs(
             changed.append({"key": k, "timestamp": ts, "changes": diffs})
     return new_df, drop_df, pd.DataFrame(changed)
 
-@st.cache_data(show_spinner=False)
-def summarize_column_diffs(
+# @st.cache_data(show_spinner=False)
+def summarise_column_diffs(
     df_base: pd.DataFrame, df_updated: pd.DataFrame
 ) -> pd.DataFrame:
     """Generic column summary for any identifier columns."""
@@ -131,13 +131,13 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
     sess = st.session_state.session
     # If no Snowpark session, show error and exit
     if sess is None:
-        st.sidebar.error("⛔️🔌 No Snowpark session; initialize connection.")
+        st.sidebar.error("⛔️🔌 No Snowpark session; initialise connection.")
         return False, ("",)*6
 
     with st.sidebar:
         # Display logo above sidebar via binary to avoid file path issues
         try:
-            with open("logo.png", "rb") as img_file:
+            with open("dxrx_logo.png", "rb") as img_file:
                 img_bytes = img_file.read()
             st.image(img_bytes, width=100)
         except Exception:
@@ -273,7 +273,7 @@ def render_results() -> None:
 ################################################################################
 
 def main() -> None:
-    st.set_page_config(page_title="Cohort Comparison Tool", page_icon="🧪", layout="wide")
+    st.set_page_config(page_title="🛠️ Cohort Comparison Tool", page_icon="🧪", layout="wide")
     st.title("Cohort Comparison Tool – PoC")
 
     init_state()
@@ -344,7 +344,7 @@ def main() -> None:
             st.session_state.new_records_df = new_df
             st.session_state.dropped_records_df = drop_df
             st.session_state.changed_records_df = change_df
-            st.session_state.column_diff_summary = summarize_column_diffs(df_base, df_target)
+            st.session_state.column_diff_summary = summarise_column_diffs(df_base, df_target)
             st.session_state.comparison_ran = True
 
     # Render results if available
