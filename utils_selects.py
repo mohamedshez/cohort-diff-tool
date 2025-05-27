@@ -1,5 +1,5 @@
-"""Utility helpers for searchable dropdowns in Streamlit / Snowflake.
-
+"""
+Utility helpers for searchable dropdowns in Streamlit / Snowflake.
 These functions mirror the approach used in the Cohort Builder app so you can
 reuse the same UX patterns (search-as-you-type select boxes that cascade
 Database ➜ Schema ➜ Table) inside any Streamlit page.
