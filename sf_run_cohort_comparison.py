@@ -24,7 +24,7 @@ warnings.filterwarnings(
     "ignore", message="You have an incompatible version of 'pyarrow'.*"
 )
 
-MAX_ROWS = 1_000  # Limit to 1k rows
+MAX_ROWS = 10_000  # Limit to 10k rows
 
 ################################################################################
 # 🎛 Session & Snowpark connection
@@ -50,8 +50,11 @@ def init_state() -> None:
         st.session_state.setdefault(k, v)
 
     def reset_all() -> None:
+        """Clear user selections and results, then reinitialize comparison_ran."""
         for key in defaults.keys():
             st.session_state.pop(key, None)
+        # Ensure comparison_ran exists to avoid missing attribute
+        st.session_state["comparison_ran"] = False
     st.session_state["reset_all"] = reset_all
 
     if "session" not in st.session_state:
@@ -211,9 +214,11 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
         if st.button("🔄 Reset All"):
             st.session_state.reset_all()
 
+        st.markdown("<br>", unsafe_allow_html=True)
+
         # Compare action button
         valid = all([db_src, sch_src, tsrc, db_tgt, sch_tgt, tgt, jk])
-        run_btn = st.button("🔍 Compare Tables", disabled=not valid)
+        run_btn = st.button("🔍 **Compare Tables**", disabled=not valid)
 
     return run_btn, (db_src, sch_src, tsrc, db_tgt, sch_tgt, tgt)
 
@@ -273,64 +278,78 @@ def main() -> None:
 
     init_state()
 
-    # Always render sidebar for source/target selection
+    # Sidebar selection
     clicked, ids = render_sidebar()
 
-    # Display helper text in main area before comparison
-    if not st.session_state.get("comparison_ran", False):
+    # Show instructions until a run is triggered
+    if not st.session_state.comparison_ran and not clicked:
         st.markdown(
             """
             **At a Glance:**  
             • Select your **Source Table** by choosing `Database` → `Schema` → `Table`.  
             • Select your **Target Table** similarly.  
-            • Pick a **Join Key** column that uniquely identifies rows in both tables.  
-            • Click **Compare Tables** to compute and display:  
-              - New records  
-              - Dropped records  
-              - Changed records with a **JSON change summary**
+            • Pick a **Join Key** column that uniquely identifies rows.  
+            • Click **Compare Tables** to compute and display diffs:
+              - `New records`  
+              - `Dropped records`  
+              - `Changed records` with a **JSON change summary**
             """,
             unsafe_allow_html=True,
         )
-
-    # Exit early if sidebar not fully configured
-    if not clicked:
         return
 
-    ds, ss, tsrc, dt, stgt, tgt = ids
-    sess = st.session_state.session
+    # Perform comparison when user clicks
+    if clicked:
+        ds, ss, tsrc, db_tgt, sch_tgt, tgt = ids
+        sess = st.session_state.session
+        # Fetch & compute diffs with spinner
+        with st.spinner("🔄 Fetching & computing diffs…"):
+            import time
+            t0 = time.time()
+            df_base = fetch_table(sess, ds, ss, tsrc)
+            df_target = fetch_table(sess, db_tgt, sch_tgt, tgt)
+            t1 = time.time()
+            st.info(f"✅ Fetched tables in {t1 - t0:.2f}s (rows: source={len(df_base)}, target={len(df_target)})")
 
-    # Fetch & compute diffs with user feedback spinner
-    with st.spinner("🔄 Fetching & computing diffs…"):
-        df_base = fetch_table(sess, ds, ss, tsrc)
-        df_target = fetch_table(sess, dt, stgt, tgt)
+            # Load tables
+            try:
+                df_base = fetch_table(sess, ds, ss, tsrc)
+                df_target = fetch_table(sess, db_tgt, sch_tgt, tgt)
+            except Exception as e:
+                st.error(f"❌ Error loading tables: {e}")
+                return
 
-        # Schema validation: must match exact schemas to proceed
-        if not compare_schemas_strict(df_base, df_target):
-            st.error("❌ Table schemas do not match exactly. Please select tables with identical schemas before comparing.")
-            return
+            # Schema validation: must match exact schemas to proceed
+            if not compare_schemas_strict(df_base, df_target):
+                st.error("❌ Table schemas do not match exactly. Please select tables with identical schemas before comparing.")
+                return
 
-        if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
-            st.warning(f"⚠️ Large (> {MAX_ROWS:,}) may take a while—please be patient.")
-            st.info("❗️ Limited to 1k rows for this PoC.")
+            # Guard large datasets
+            if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
+                st.warning(f"⚠️ Large (> {MAX_ROWS:,}) tables may take longer to process.")
+                st.info("❗️ Limited to 10k rows for this PoC.")
 
-        try:
-            new_df, drop_df, change_df = compute_diffs(
-                df_base, df_target, st.session_state.join_key
-            )
+            # Compute diffs
+            try:
+                new_df, drop_df, change_df = compute_diffs(
+                    df_base, df_target, st.session_state.join_key
+                )
+                t2 = time.time()
+                st.info(f"✅ Computed diffs in {t2 - t1:.2f}s")
+            except ValueError as e:
+                st.error(str(e))
+                return
+
+            # Save to state
             st.session_state.new_records_df = new_df
             st.session_state.dropped_records_df = drop_df
             st.session_state.changed_records_df = change_df
-        except ValueError as e:
-            st.error(f"❌ {e}")
-            return
+            st.session_state.column_diff_summary = summarize_column_diffs(df_base, df_target)
+            st.session_state.comparison_ran = True
 
-        st.session_state.column_diff_summary = summarize_column_diffs(
-            df_base, df_target
-        )
-        st.session_state.comparison_ran = True
-
-    # Render after spinner completes
-    render_results()
+    # Render results if available
+    if st.session_state.comparison_ran:
+        render_results()
 
 if __name__ == "__main__":
     main()
