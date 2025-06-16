@@ -4,7 +4,7 @@ Streamlit application for comparing Snowflake cohort datasets via Snowpark;
 supports composite key-based diffs and generic column summaries.
 
 Author : Mohamed Shez
-Created : 20-05-2025  |  Updated : 29-05-2025
+Created : 20-05-2025  |  Updated : 16-06-2025
 """
 
 from __future__ import annotations
@@ -116,13 +116,13 @@ def compute_diffs(
     # 1) per-key existence & uniqueness
     for k in keys:
         if k not in df_base.columns or k not in df_updated.columns:
-            raise ValueError(f"❌ join key '{k}' missing from one of the tables.")
+            raise ValueError(f"❌ Join key '{k}' missing from one of the tables.")
         if df_base[k].duplicated().any() or df_updated[k].duplicated().any():
-            raise ValueError(f"❌ join key '{k}' must be unique in both tables.")
+            raise ValueError(f"❌ Join key '{k}' must be unique in both tables.")
 
     # 2) composite uniqueness
     if df_base.duplicated(subset=keys).any() or df_updated.duplicated(subset=keys).any():
-        raise ValueError(f"❌ composite join key {keys} must be unique in both tables.")
+        raise ValueError(f"❌ Composite join key {keys} must be unique in both tables.")
 
     # 3) build indices
     base = df_base.set_index(keys)
@@ -294,21 +294,46 @@ def render_results() -> None:
     st.success("✅ Comparison complete")
 
     # ------------------------------------------------------------------ #
-    # 1️⃣  Cache payloads
+    # 1️⃣  Cache payloads - ADD JSON FORMATS
     # ------------------------------------------------------------------ #
     if "col_summary_bytes" not in st.session_state:
+        # CSV payload
         st.session_state.col_summary_bytes = (
             st.session_state.column_diff_summary.to_csv(index=False).encode()
         )
+        # NEW: JSON payload
+        st.session_state.col_summary_json_bytes = json.dumps(
+            st.session_state.column_diff_summary.to_dict(orient="records"),
+            indent=2,
+            default=str
+        ).encode()
+
     if "new_rows_bytes" not in st.session_state:
+        # CSV payload
         st.session_state.new_rows_bytes = (
             st.session_state.new_records_df.to_csv(index=False).encode()
         )
+        # NEW: JSON payload
+        st.session_state.new_rows_json_bytes = json.dumps(
+            st.session_state.new_records_df.to_dict(orient="records"),
+            indent=2,
+            default=str
+        ).encode()
+
     if "dropped_rows_bytes" not in st.session_state:
+        # CSV payload
         st.session_state.dropped_rows_bytes = (
             st.session_state.dropped_records_df.to_csv(index=False).encode()
         )
+        # NEW: JSON payload
+        st.session_state.dropped_rows_json_bytes = json.dumps(
+            st.session_state.dropped_records_df.to_dict(orient="records"),
+            indent=2,
+            default=str
+        ).encode()
+
     if "changed_rows_bytes" not in st.session_state:
+        # Existing JSON payload (unchanged)
         st.session_state.changed_rows_bytes = json.dumps(
             st.session_state.changed_records_df.to_dict(orient="records"),
             indent=2,
@@ -318,10 +343,12 @@ def render_results() -> None:
     sess = st.session_state.session
 
     # ------------------------------------------------------------------ #
-    # 2️⃣  Column summary (always show)
+    # 2️⃣  Column summary (always show) - ADD JSON DOWNLOAD
     # ------------------------------------------------------------------ #
     st.subheader("📊 Column-level summary")
     st.dataframe(st.session_state.column_diff_summary, use_container_width=True)
+
+    # NEW: Show both CSV and JSON download options
     st.markdown(
         _download_anchor(sess,
                          st.session_state.col_summary_bytes,
@@ -329,9 +356,16 @@ def render_results() -> None:
                          "text/csv"),
         unsafe_allow_html=True,
     )
+    st.markdown(
+        _download_anchor(sess,
+                         st.session_state.col_summary_json_bytes,
+                         "column_summary.json",
+                         "application/json"),
+        unsafe_allow_html=True,
+    )
 
     # ------------------------------------------------------------------ #
-    # 3️⃣  Metrics row
+    # 3️⃣  Metrics row (unchanged)
     # ------------------------------------------------------------------ #
     new_ct     = len(st.session_state.new_records_df)
     dropped_ct = len(st.session_state.dropped_records_df)
@@ -343,14 +377,22 @@ def render_results() -> None:
     c.metric("Changed rows", changed_ct)
 
     # ------------------------------------------------------------------ #
-    # 4️⃣  Conditional download links + expanders
+    # 4️⃣  Conditional download links + expanders - ADD JSON FOR ALL
     # ------------------------------------------------------------------ #
     if new_ct:
+        # NEW: Show both CSV and JSON
         st.markdown(
             _download_anchor(sess,
                              st.session_state.new_rows_bytes,
                              "new_rows.csv",
                              "text/csv"),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            _download_anchor(sess,
+                             st.session_state.new_rows_json_bytes,
+                             "new_rows.json",
+                             "application/json"),
             unsafe_allow_html=True,
         )
         with st.expander("🆕 New records", expanded=False):
@@ -360,11 +402,19 @@ def render_results() -> None:
             )
 
     if dropped_ct:
+        # NEW: Show both CSV and JSON
         st.markdown(
             _download_anchor(sess,
                              st.session_state.dropped_rows_bytes,
                              "dropped_rows.csv",
                              "text/csv"),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            _download_anchor(sess,
+                             st.session_state.dropped_rows_json_bytes,
+                             "dropped_rows.json",
+                             "application/json"),
             unsafe_allow_html=True,
         )
         with st.expander("🗑️ Dropped records", expanded=False):
@@ -374,6 +424,7 @@ def render_results() -> None:
             )
 
     if changed_ct:
+        # Existing JSON download (unchanged)
         st.markdown(
             _download_anchor(sess,
                              st.session_state.changed_rows_bytes,
