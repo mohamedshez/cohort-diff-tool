@@ -3,7 +3,7 @@ Cohort Comparison Tool 🧬🚀
 Step-2 PoC – compares Snowflake tables with **identical OR differing** schemas.
 
 Author  : Mohamed Shez
-Created : 20-05-2025   |  Updated : 16-06-2025
+Created : 20-05-2025   |  Updated : 18-06-2025
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import utils_selects as utils
 # ──────────────────────────────────────────────────────────────────────────────
 # 🔧 Constants & settings
 # ──────────────────────────────────────────────────────────────────────────────
-MAX_ROWS       = 10_000          # UI display guard
+MAX_ROWS       = 10_000          # UI display guard for 10k rows
 MAX_EMBED_SIZE = 2_000_000       # ~2 MB before using presigned URL
 STAGE_NAME     = "@streamlit_downloads"
 
@@ -39,7 +39,6 @@ warnings.filterwarnings(
 # ──────────────────────────────────────────────────────────────────────────────
 # 🛠 Re-usable helpers – candidate for utils.py in a later refactor
 # ──────────────────────────────────────────────────────────────────────────────
-
 @st.cache_data(show_spinner=False)
 def fetch_table(_sess: Session, db: str, sch: str, tbl: str) -> pd.DataFrame:
     fq_name = f"{utils._quote(db)}.{utils._quote(sch)}.{utils._quote(tbl)}"
@@ -397,7 +396,7 @@ def render_results() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 def main() -> None:
     st.set_page_config(page_title="Cohort Comparison Tool – PoC", page_icon="🧪", layout="wide")
-    st.title("Cohort Comparison Tool 🧬🚀 – PoC (identical & differing schemas)")
+    st.title("Cohort Comparison Tool 🧬🚀 – PoC")
 
     init_state()
     clicked, ids = render_sidebar()
@@ -423,67 +422,83 @@ def main() -> None:
         sess = st.session_state.session
 
         with st.spinner("🔄 Fetching & computing diffs…"):
+            # ───── Init progress bar ───────────────────────────────────────────
+            progress_placeholder = st.empty()
+            progress_bar = progress_placeholder.progress(0)
+
+            # ── 1) Fetch tables ────────────────────────────────────────────────
             t0 = time.time()
             df_base_raw = fetch_table(sess, db_src, sch_src, tbl_src)
-            df_target_raw = fetch_table(sess, db_tgt, sch_tgt, tbl_tgt)
-            st.info(f"✅ Fetched tables in {time.time() - t0:.2f}s "
-                   f"(rows: source={len(df_base_raw):,}, target={len(df_target_raw):,})")
+            progress_bar.progress(10)
 
-            # 1️⃣ Column intersection & validation
+            df_target_raw = fetch_table(sess, db_tgt, sch_tgt, tbl_tgt)
+            progress_bar.progress(20)
+
+            st.info(
+                f"✅ Fetched tables in {time.time() - t0:.2f}s "
+                f"(rows: source={len(df_base_raw):,}, target={len(df_target_raw):,})"
+            )
+            progress_bar.progress(30)
+
+            # ── 2) Column intersection + validation ─────────────────────────────
             common_cols = utils.get_common_columns(df_base_raw, df_target_raw)
             if not common_cols:
+                progress_placeholder.empty()
                 st.error("❌ No matching columns between the two tables – nothing to compare.")
                 return
+            progress_bar.progress(40)
 
             missing_keys = [k for k in st.session_state.join_key if k not in common_cols]
             if missing_keys:
+                progress_placeholder.empty()
                 st.error(f"❌ Selected join key(s) {missing_keys} not found in both tables.")
+                st.info(f"❗️ Please pick a key that exists in both tables and try again.")
                 return
+            progress_bar.progress(50)
 
-            # NEW: Column selection for differing schemas
+            # ── 3) Column selection for differing schemas ───────────────────────
             if not compare_schemas_strict(df_base_raw, df_target_raw):
-                if st.toggle("Select specific columns to compare",
-                           help="Choose which shared columns to include in comparison"):
-                    selected = st.multiselect(
-                        "Columns to compare",
-                        options=[c for c in common_cols if c not in st.session_state.join_key],
-                        default=[c for c in common_cols if c not in st.session_state.join_key],
-                        key="selected_columns"
-                    )
-                    compare_cols = st.session_state.join_key + selected
-                else:
-                    compare_cols = st.session_state.join_key + [c for c in common_cols if c not in st.session_state.join_key]
-                df_base = df_base_raw[compare_cols]
-                df_target = df_target_raw[compare_cols]
+                # remove bar when we show the “schemas differ” info
+                progress_placeholder.empty()
+                st.info("ℹ️ Schemas differ – comparing only shared columns.")
+                cols_to_keep = st.session_state.join_key + [
+                    c for c in common_cols if c not in st.session_state.join_key
+                ]
+                df_base = df_base_raw[cols_to_keep]
+                df_target = df_target_raw[cols_to_keep]
             else:
+                st.success("✅ Schemas are identical – performing full column comparison.")
                 df_base = df_base_raw
                 df_target = df_target_raw
+            progress_bar.progress(70)
 
-            # 2️⃣ Informational schema banner
-            if compare_schemas_strict(df_base_raw, df_target_raw):
-                st.success("✅ Schemas are identical – performing full column comparison.")
-            else:
-                st.info("ℹ️ Schemas differ – comparing only selected shared columns.")
-
-            # 3️⃣ Row-count guard
+            # ── 4) Row-count guard ─────────────────────────────────────────────
             if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
+                progress_placeholder.empty()
                 st.warning(f"⚠️ Large tables (> {MAX_ROWS:,} rows) may take longer.")
+            progress_bar.progress(80)
 
-            # 4️⃣ Diff compute
+            # ── 5) Compute diffs ────────────────────────────────────────────────
             try:
                 new_df, drop_df, change_df = compute_diffs(
                     df_base, df_target, st.session_state.join_key
                 )
             except ValueError as e:
+                progress_placeholder.empty()
                 st.error(f"❌ {e}")
                 return
+            progress_bar.progress(90)
 
-            # 5️⃣ Store & summarise
+            # ── 6) Store & summarise ───────────────────────────────────────────
             st.session_state.new_records_df      = new_df
             st.session_state.dropped_records_df  = drop_df
             st.session_state.changed_records_df  = change_df
             st.session_state.column_diff_summary = utils.summarise_column_diffs(df_base, df_target)
             st.session_state.comparison_ran      = True
+
+            # ── 7) Finish & clear bar ──────────────────────────────────────────
+            progress_bar.progress(100)
+            progress_placeholder.empty()
 
         render_results()
 
