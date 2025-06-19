@@ -15,18 +15,21 @@ import os
 import tempfile
 import time
 import warnings
+from snowflake.snowpark import Session
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
-import utils_selects as utils
+import utils
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 🔧 Constants & settings
 # ──────────────────────────────────────────────────────────────────────────────
-MAX_ROWS       = 10_000          # UI display guard for 10k rows
-MAX_EMBED_SIZE = 2_000_000       # ~2 MB before using presigned URL
+MAX_ROWS       = 1_000         # UI display guard for 1k rows
+MAX_EMBED_SIZE = 2_000_000     # ~2 MB before using presigned URL
+MAX_LIMIT      = 1_000_000     # 1M Snowpark row limit for `to_pandas()`
 STAGE_NAME     = "@streamlit_downloads"
 
 warnings.filterwarnings(
@@ -44,7 +47,6 @@ def fetch_table(_sess: Session, db: str, sch: str, tbl: str) -> pd.DataFrame:
     fq_name = f"{utils._quote(db)}.{utils._quote(sch)}.{utils._quote(tbl)}"
     return _sess.table(fq_name).to_pandas()
 
-
 @st.cache_data(show_spinner=False)
 def compare_schemas_strict(df1: pd.DataFrame, df2: pd.DataFrame) -> bool:
     """True ⇢ columns & dtypes match **exactly** (order as well)."""
@@ -53,46 +55,46 @@ def compare_schemas_strict(df1: pd.DataFrame, df2: pd.DataFrame) -> bool:
         and all(df1.dtypes.values == df2.dtypes.values)
     )
 
-
 @st.cache_data(show_spinner=False, ttl=60)
 def compute_diffs(
     df_base: pd.DataFrame,
     df_updated: pd.DataFrame,
     keys: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Row-level diff (new / dropped / changed) with composite key."""
-    # 1️⃣ Uniqueness checks
+    """Row-level diff (new / dropped / changed) with composite key,
+    automatically deduplicating on the key columns."""
+    # 1️⃣ Ensure join-key columns exist
     for k in keys:
         if k not in df_base.columns or k not in df_updated.columns:
             raise ValueError(f"Join key '{k}' missing from one of the tables.")
-        if df_base[k].duplicated().any() or df_updated[k].duplicated().any():
-            raise ValueError(f"Join key '{k}' must be unique in both tables.")
-    if df_base.duplicated(subset=keys).any() or df_updated.duplicated(subset=keys).any():
-        raise ValueError(f"Composite join key {keys} must be unique in both tables.")
 
-    # 2️⃣ Base & target already sliced to the chosen compare_cols
-    base = df_base.copy().set_index(keys)
-    upd  = df_updated.copy().set_index(keys)
+    # 2️⃣ Drop duplicate rows on the key(s), keep first occurrence
+    df_base = df_base.drop_duplicates(subset=keys, keep="first")
+    df_updated = df_updated.drop_duplicates(subset=keys, keep="first")
 
-    # 3️⃣ New records (in target but not in source)
+    # 3️⃣ Re-index for diffing
+    base = df_base.set_index(keys)
+    upd  = df_updated.set_index(keys)
+
+    # 4️⃣ New records (in target but not in source)
     new_idx  = upd.index.difference(base.index)
     new_df   = upd.loc[new_idx].reset_index()
 
-    # 4️⃣ Dropped records (in source but not in target)
+    # 5️⃣ Dropped records (in source but not in target)
     drop_idx = base.index.difference(upd.index)
     drop_df  = base.loc[drop_idx].reset_index()
 
-    # 5️⃣ Changed records
-    common_cols = [c for c in df_base.columns if c not in keys]
+    # 6️⃣ Changed records
+    # Only compare non-key columns
+    common_cols   = [c for c in df_base.columns if c not in keys]
     intersect_idx = base.index.intersection(upd.index)
 
-    changed: List[Dict[str, object]] = []
+    changes: List[Dict[str, object]] = []
     ts = datetime.now(timezone.utc).isoformat()
     for idx in intersect_idx:
-        diffs = {}
+        diffs: Dict[str,Dict[str,object]] = {}
         for col in common_cols:
-            a = base.at[idx, col]
-            b = upd.at[idx, col]
+            a, b = base.at[idx, col], upd.at[idx, col]
             if pd.isna(a) and pd.isna(b):
                 continue
             if (a != b) or (pd.isna(a) != pd.isna(b)):
@@ -108,11 +110,15 @@ def compute_diffs(
                     "to":   utils._json_safe(b),
                 }
         if diffs:
-            # key as dict for multi-column keys
-            key_dict = {k: idx[i] for i, k in enumerate(keys)} if len(keys) > 1 else {keys[0]: idx}
-            changed.append({"key": key_dict, "timestamp": ts, "changes": diffs})
+            # Pack key into a dict (handles multi-column keys)
+            key_dict = (
+                {k: idx[i] for i,k in enumerate(keys)}
+                if len(keys) > 1
+                else {keys[0]: idx}
+            )
+            changes.append({"key": key_dict, "timestamp": ts, "changes": diffs})
 
-    return new_df, drop_df, pd.DataFrame(changed)
+    return new_df, drop_df, pd.DataFrame(changes)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -145,9 +151,36 @@ def init_state() -> None:
 
     st.session_state["reset_all"] = reset_all
 
-    if "session" not in st.session_state:
-        from snowflake.snowpark import Session  # type: ignore
-        st.session_state.session = Session.builder.getOrCreate()
+    if 'session' in st.session_state:
+        return st.session_state.session
+    try:
+        session = Session.builder.getOrCreate()
+    except Exception as e1:
+        try:
+            section = st.secrets["snowflake"]
+            connection_parameters = {
+                "account": section["account"],
+                "authenticator": section["authenticator"],
+                "user": section["user"],
+                "database": section["database"],
+                "schema": section["schema"],
+                "role": section["role"],
+                "warehouse": section["warehouse"]
+            }
+            session = Session.builder.configs(connection_parameters).create()
+        except Exception as e2:
+            st.error(f"Failed to connect to Snowflake. Initial error: {e1}. Secondary error: {e2}")
+            return None
+
+    # Ensure our download stage exists
+    try:
+        stage = STAGE_NAME.lstrip("@")
+        session.sql(f"CREATE STAGE IF NOT EXISTS {stage}").collect()
+    except Exception:
+        pass
+
+    st.session_state.session = session
+    return session
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -163,7 +196,7 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
     with st.sidebar:
         # (logo & UI identical to Step-1)
         try:
-            with open("dxrx_logo.png", "rb") as f:
+            with open("logo.png", "rb") as f:
                 st.image(f.read(), width=100)
         except Exception:
             st.warning("⚠️ Logo not found or cannot be loaded.")
@@ -284,7 +317,6 @@ def _data_uri(data: bytes, filename: str, mime: str) -> str:
         f'href="data:{mime};base64,{b64}">📥 {html.escape(filename)}</a>'
     )
 
-
 def _presigned_link(sess, data: bytes, filename: str, mime: str) -> str:
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(data)
@@ -298,13 +330,17 @@ def _presigned_link(sess, data: bytes, filename: str, mime: str) -> str:
         f'📥 {html.escape(filename)}</a>'
     )
 
-
 def _download_anchor(sess, data: bytes, filename: str, mime: str) -> str:
-    return (
-        _data_uri(data, filename, mime)
-        if len(data) <= MAX_EMBED_SIZE
-        else _presigned_link(sess, data, filename, mime)
-    )
+    # Always try data-URI for small payloads,
+    # otherwise attempt presigned-link but fall back if that errors.
+    if len(data) <= MAX_EMBED_SIZE:
+        return _data_uri(data, filename, mime)
+    try:
+        return _presigned_link(sess, data, filename, mime)
+    except Exception:
+        # Fallback to data-URI if presigned link fails
+        # e.g. stage not authorized or missing
+        return _data_uri(data, filename, mime)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -336,59 +372,85 @@ def render_results() -> None:
 
     # 2️⃣ Column summary
     st.subheader("📊 Column-level summary")
-    st.dataframe(st.session_state.column_diff_summary, use_container_width=True)
+    tab1, tab2 = st.tabs(["📋 Table View", "📈 Graph View"])
 
-    st.markdown(
-        _download_anchor(sess, st.session_state.col_summary_bytes, "column_summary.csv", "text/csv"),
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        _download_anchor(sess, st.session_state.col_summary_json_bytes, "column_summary.json", "application/json"),
-        unsafe_allow_html=True,
-    )
+    # ➕ Metrics
+    with tab1:
+        st.dataframe(st.session_state.column_diff_summary, use_container_width=True)
 
-    # 3️⃣ Metrics row
-    new_ct     = len(st.session_state.new_records_df)
-    dropped_ct = len(st.session_state.dropped_records_df)
-    changed_ct = len(st.session_state.changed_records_df)
-
-    n, d, c = st.columns(3)
-    n.metric("New rows",     new_ct)
-    d.metric("Dropped rows", dropped_ct)
-    c.metric("Changed rows", changed_ct)
-
-    # 4️⃣ Downloads + expanders
-    if new_ct:
         st.markdown(
-            _download_anchor(sess, st.session_state.new_rows_bytes, "new_rows.csv", "text/csv"),
+            _download_anchor(sess, st.session_state.col_summary_bytes, "column_summary.csv", "text/csv"),
             unsafe_allow_html=True,
         )
         st.markdown(
-            _download_anchor(sess, st.session_state.new_rows_json_bytes, "new_rows.json", "application/json"),
+            _download_anchor(sess, st.session_state.col_summary_json_bytes, "column_summary.json", "application/json"),
             unsafe_allow_html=True,
         )
-        with st.expander("🆕 New records", expanded=False):
-            st.dataframe(st.session_state.new_records_df.head(MAX_ROWS), use_container_width=True)
 
-    if dropped_ct:
-        st.markdown(
-            _download_anchor(sess, st.session_state.dropped_rows_bytes, "dropped_rows.csv", "text/csv"),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            _download_anchor(sess, st.session_state.dropped_rows_json_bytes, "dropped_rows.json", "application/json"),
-            unsafe_allow_html=True,
-        )
-        with st.expander("🗑️ Dropped records", expanded=False):
-            st.dataframe(st.session_state.dropped_records_df.head(MAX_ROWS), use_container_width=True)
+        # 3️⃣ Metrics row
+        new_ct     = len(st.session_state.new_records_df)
+        dropped_ct = len(st.session_state.dropped_records_df)
+        changed_ct = len(st.session_state.changed_records_df)
 
-    if changed_ct:
-        st.markdown(
-            _download_anchor(sess, st.session_state.changed_rows_bytes, "changed_rows.json", "application/json"),
-            unsafe_allow_html=True,
-        )
-        with st.expander("🔄 Changed records – diffs", expanded=False):
-            st.json(st.session_state.changed_records_df.to_dict(orient="records"))
+        n, d, c = st.columns(3)
+        n.metric("New rows",     new_ct)
+        d.metric("Dropped rows", dropped_ct)
+        c.metric("Changed rows", changed_ct)
+
+        # 4️⃣ Downloads + expanders
+        if new_ct:
+            st.markdown(
+                _download_anchor(sess, st.session_state.new_rows_bytes, "new_rows.csv", "text/csv"),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                _download_anchor(sess, st.session_state.new_rows_json_bytes, "new_rows.json", "application/json"),
+                unsafe_allow_html=True,
+            )
+            with st.expander("🆕 New records", expanded=False):
+                st.dataframe(st.session_state.new_records_df.head(MAX_ROWS), use_container_width=True)
+
+        if dropped_ct:
+            st.markdown(
+                _download_anchor(sess, st.session_state.dropped_rows_bytes, "dropped_rows.csv", "text/csv"),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                _download_anchor(sess, st.session_state.dropped_rows_json_bytes, "dropped_rows.json", "application/json"),
+                unsafe_allow_html=True,
+            )
+            with st.expander("🗑️ Dropped records", expanded=False):
+                st.dataframe(st.session_state.dropped_records_df.head(MAX_ROWS), use_container_width=True)
+
+        if changed_ct:
+            st.markdown(
+                _download_anchor(sess, st.session_state.changed_rows_bytes, "changed_rows.json", "application/json"),
+                unsafe_allow_html=True,
+            )
+            with st.expander("🔄 Changed records – diffs", expanded=False):
+                st.json(st.session_state.changed_records_df.to_dict(orient="records"))
+
+    # 📊 Chart (built-in)
+    with tab2:
+        col1, col2 = st.columns(2)
+
+        # ➕ Metrics
+        with col1:
+            new_ct     = len(st.session_state.new_records_df)
+            dropped_ct = len(st.session_state.dropped_records_df)
+            changed_ct = len(st.session_state.changed_records_df)
+
+            st.metric("New Rows", new_ct)
+            st.metric("Dropped Rows", dropped_ct)
+            st.metric("Changed Rows", changed_ct)
+
+        # 📊 Chart (built-in)
+        with col2:
+            chart_data = pd.DataFrame({
+                "Change Type": ["New", "Dropped", "Changed"],
+                "Count": [new_ct, dropped_ct, changed_ct]
+            })
+            st.bar_chart(chart_data.set_index("Change Type"))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -476,6 +538,12 @@ def main() -> None:
             if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
                 progress_placeholder.empty()
                 st.warning(f"⚠️ Large tables (> {MAX_ROWS:,} rows) may take longer.")
+                if len(df_base) == MAX_LIMIT or len(df_target) == MAX_LIMIT:
+                    st.warning(
+                        f"⚠️ One of the tables has exceeded {MAX_LIMIT:,} rows, "
+                        "which may lead to performance issues. "
+                        "Consider filtering by choosing more than one join key for narrow search."
+                    )
             progress_bar.progress(80)
 
             # ── 5) Compute diffs ────────────────────────────────────────────────

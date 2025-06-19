@@ -8,7 +8,143 @@ Database ➜ Schema ➜ Table) inside any Streamlit page.
 import snowflake.connector
 import pandas as pd
 import streamlit as st
-from typing import List
+from snowflake.snowpark import Session
+from typing import List, Dict, Callable, Any
+from datetime import datetime, timezone
+
+
+def quote_identifier(ident: str) -> str:
+    """
+    Safely quote a Snowflake identifier.
+
+    Ensures the provided identifier is wrapped in double quotes,
+    escaping any internal quotes per Snowflake syntax.
+
+    Args:
+        ident (str): The database, schema, or table identifier.
+
+    Returns:
+        str: The safely quoted identifier.
+
+    Raises:
+        ValueError: If the identifier is an empty string.
+    """
+    if not ident:
+        raise ValueError("Database, schema and table names must not be empty.")
+    return '"' + ident.replace('"', '""') + '"'
+
+
+@st.cache_data(show_spinner=False)
+def get_table_columns(
+    session: Session,
+    db: str,
+    sch: str,
+    tbl: str
+) -> List[str]:
+    """
+    Retrieve the column names for a given Snowflake table and cache the result.
+
+    Args:
+        session (Session): An active Snowpark session.
+        db (str): Database name.
+        sch (str): Schema name.
+        tbl (str): Table name.
+
+    Returns:
+        List[str]: A list of column names in order.
+
+    This function is cached to avoid repeated metadata queries for tables whose schemas
+    do not change frequently.
+    """
+    fq = f"{quote_identifier(db)}.{quote_identifier(sch)}.{quote_identifier(tbl)}"
+    sql = (
+        f"SELECT COLUMN_NAME "
+        f"FROM {db}.INFORMATION_SCHEMA.COLUMNS "
+        f"WHERE TABLE_SCHEMA = '{sch}' AND TABLE_NAME = '{tbl}' "
+        f"ORDER BY ORDINAL_POSITION"
+    )
+    rows = session.sql(sql).collect()
+    return [r[0] for r in rows]
+
+
+def build_diff_queries(
+    src: str,
+    tgt: str,
+    keys: List[str],
+    common_cols: List[str],
+) -> Dict[str, Callable[..., str]]:
+    """
+    Build SQL templates for computing diffs between two tables.
+
+    Constructs a CTE (Common Table Expression) that full-outer-joins
+    source and target on the given keys, and labels each row as 'new',
+    'dropped', 'changed', or 'same'.
+
+    Args:
+        src (str): Fully qualified source table (e.g., 'DB.SCH.TBL').
+        tgt (str): Fully qualified target table.
+        keys (List[str]): List of join key column names.
+        common_cols (List[str]): List of all shared column names.
+
+    Returns:
+        Dict[str, Callable[..., str]]: A dictionary containing:
+            - 'new_count': SQL string to count new records.
+            - 'dropped_count': SQL string to count dropped records.
+            - 'changed_count': SQL string to count changed records.
+            - 'page_sql': Function(diff_type, limit, offset) returning SQL for paginated results.
+    """
+    # Quote join keys
+    q_keys = [quote_identifier(k) for k in keys]
+    on_clause = " AND ".join([f"src.{q} = tgt.{q}" for q in q_keys])
+
+    # Identify non-key columns for change detection
+    non_key_cols = [c for c in common_cols if c not in keys]
+
+    # Build unified key selection
+    unified_keys = ", ".join([
+        f"COALESCE(src.{quote_identifier(k)}, tgt.{quote_identifier(k)}) AS {quote_identifier(k)}"
+        for k in keys
+    ])
+
+    # Build diff CASE expression
+    conditions = " OR ".join([
+        f"src.{quote_identifier(c)} IS DISTINCT FROM tgt.{quote_identifier(c)}"
+        for c in non_key_cols
+    ]) or "FALSE"
+    diff_case = (
+        f"CASE "
+        f"WHEN src.{q_keys[0]} IS NULL THEN 'new' "
+        f"WHEN tgt.{q_keys[0]} IS NULL THEN 'dropped' "
+        f"WHEN ({conditions}) THEN 'changed' "
+        f"ELSE 'same' END AS diff_type"
+    )
+
+    # Construct the CTE
+    cte = (
+        f"WITH diffs AS ("
+        f"SELECT {unified_keys}, {diff_case} "
+        f"FROM {src} src FULL OUTER JOIN {tgt} tgt ON {on_clause}"
+        f")"
+    )
+
+    # Lambda to generate count queries
+    def count_query(diff_type: str) -> str:
+        return f"{cte} SELECT COUNT(*) AS cnt FROM diffs WHERE diff_type = '{diff_type}'"
+
+    # Function to generate page SQL
+    def page_sql(diff_type: str, limit: int, offset: int) -> str:
+        order_cols = ", ".join(q_keys)
+        return (
+            f"{cte} SELECT * FROM diffs WHERE diff_type = '{diff_type}' "
+            f"ORDER BY {order_cols} LIMIT {limit} OFFSET {offset}"
+        )
+
+    return {
+        'new_count':     count_query('new'),
+        'dropped_count': count_query('dropped'),
+        'changed_count': count_query('changed'),
+        'page_sql':      page_sql,
+    }
 
 # ---------------------------------------------------------------------------
 # LOW-LEVEL HELPER
@@ -81,6 +217,7 @@ def get_common_columns(df1: pd.DataFrame, df2: pd.DataFrame) -> list[str]:
     """Return the ordered list of shared columns (order preserved from *df1*)."""
     return [c for c in df1.columns if c in df2.columns]
 
+@st.cache_data(show_spinner=False)
 def _json_safe(value):
     """JSON-serialisable scalar with null, ISO-8601 datetimes, …"""
     if value is None or pd.isna(value):

@@ -18,7 +18,7 @@ import json
 from typing import Tuple, List, Dict
 from datetime import datetime, timezone
 
-from utils_selects import database_selectbox, list_tables, list_schemas
+from utils import database_selectbox, list_tables, list_schemas
 
 MAX_ROWS = 100_000  # PoC guard
 

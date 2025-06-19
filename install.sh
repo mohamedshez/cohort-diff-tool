@@ -12,7 +12,7 @@ source venv/bin/activate         # Windows PowerShell: .\venv\Scripts\Activate.p
 # 2 – Install Python dependencies
 ###############################################################################
 pip install --upgrade pip
-pip install streamlit snowflake-connector-python pandas
+pip install streamlit snowflake-connector-python pandas snowflake-snowpark-python
 
 ###############################################################################
 # 3 – Store Snowflake credentials for Streamlit

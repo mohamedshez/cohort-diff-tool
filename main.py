@@ -12,11 +12,12 @@ If you rename the main app file, update `APP_FILE` below.
 import subprocess
 import sys
 from pathlib import Path
+from snowflake.snowpark import Session
 
 # ---------------------------------------------------------------------------
 # Config – name of the Streamlit application file (relative to this script)
 # ---------------------------------------------------------------------------
-APP_FILE = "run_cohort_comparison.py"  # change if you renamed the app file
+APP_FILE = "streamlit_app.py"  # change if you renamed the app file
 
 
 def main() -> None:
