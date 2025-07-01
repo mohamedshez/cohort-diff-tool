@@ -1,6 +1,6 @@
 """
-Cohort Comparison Tool 🧬🚀
-Step-2 PoC – compares Snowflake tables with **identical OR differing** schemas.
+Cohort Comparison Tool 🧬🚀 - Optimized Version
+PoC – Compares Snowflake tables with identical OR differing schemas.
 
 Author  : Mohamed Shez
 Created : 20-05-2025   |  Updated : 18-06-2025
@@ -17,142 +17,51 @@ import time
 import warnings
 from snowflake.snowpark import Session
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
 import utils
+from utils import quote_identifier
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 🔧 Constants & settings
 # ──────────────────────────────────────────────────────────────────────────────
-MAX_ROWS       = 1_000         # UI display guard for 1k rows
-MAX_EMBED_SIZE = 2_000_000     # ~2 MB before using presigned URL
-MAX_LIMIT      = 1_000_000     # 1M Snowpark row limit for `to_pandas()`
-STAGE_NAME     = "@streamlit_downloads"
+MAX_ROWS = 1_000
+MAX_EMBED_SIZE = 2_000_000
+MAX_LIMIT = 1_000_000
+STAGE_NAME = "@streamlit_downloads"
+PAGE_SIZE = 100  # Pagination size for results
 
-warnings.filterwarnings(
-    "ignore", message="pandas only supports SQLAlchemy connectable.*"
-)
-warnings.filterwarnings(
-    "ignore", message="You have an incompatible version of 'pyarrow'.*"
-)
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable.*")
+warnings.filterwarnings("ignore", message="You have an incompatible version of 'pyarrow'.*")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 🛠 Re-usable helpers – candidate for utils.py in a later refactor
+# 🛠 Re-usable helpers
 # ──────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def fetch_table(_sess: Session, db: str, sch: str, tbl: str) -> pd.DataFrame:
-    fq_name = f"{utils._quote(db)}.{utils._quote(sch)}.{utils._quote(tbl)}"
-    return _sess.table(fq_name).to_pandas()
-
-@st.cache_data(show_spinner=False)
-def compare_schemas_strict(df1: pd.DataFrame, df2: pd.DataFrame) -> bool:
-    """True ⇢ columns & dtypes match **exactly** (order as well)."""
-    return (
-        list(df1.columns) == list(df2.columns)
-        and all(df1.dtypes.values == df2.dtypes.values)
-    )
-
-@st.cache_data(show_spinner=False, ttl=60)
-def compute_diffs(
-    df_base: pd.DataFrame,
-    df_updated: pd.DataFrame,
-    keys: list[str],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Row-level diff (new / dropped / changed) with composite key,
-    automatically deduplicating on the key columns."""
-    # 1️⃣ Ensure join-key columns exist
-    for k in keys:
-        if k not in df_base.columns or k not in df_updated.columns:
-            raise ValueError(f"Join key '{k}' missing from one of the tables.")
-
-    # 2️⃣ Drop duplicate rows on the key(s), keep first occurrence
-    df_base = df_base.drop_duplicates(subset=keys, keep="first")
-    df_updated = df_updated.drop_duplicates(subset=keys, keep="first")
-
-    # 3️⃣ Re-index for diffing
-    base = df_base.set_index(keys)
-    upd  = df_updated.set_index(keys)
-
-    # 4️⃣ New records (in target but not in source)
-    new_idx  = upd.index.difference(base.index)
-    new_df   = upd.loc[new_idx].reset_index()
-
-    # 5️⃣ Dropped records (in source but not in target)
-    drop_idx = base.index.difference(upd.index)
-    drop_df  = base.loc[drop_idx].reset_index()
-
-    # 6️⃣ Changed records
-    # Only compare non-key columns
-    common_cols   = [c for c in df_base.columns if c not in keys]
-    intersect_idx = base.index.intersection(upd.index)
-
-    changes: List[Dict[str, object]] = []
-    ts = datetime.now(timezone.utc).isoformat()
-    for idx in intersect_idx:
-        diffs: Dict[str,Dict[str,object]] = {}
-        for col in common_cols:
-            a, b = base.at[idx, col], upd.at[idx, col]
-            if pd.isna(a) and pd.isna(b):
-                continue
-            if (a != b) or (pd.isna(a) != pd.isna(b)):
-                if pd.isna(a):
-                    change_type = "ADDED"
-                elif pd.isna(b):
-                    change_type = "REMOVED"
-                else:
-                    change_type = "MODIFIED"
-                diffs[col] = {
-                    "change_type": change_type,
-                    "from": utils._json_safe(a),
-                    "to":   utils._json_safe(b),
-                }
-        if diffs:
-            # Pack key into a dict (handles multi-column keys)
-            key_dict = (
-                {k: idx[i] for i,k in enumerate(keys)}
-                if len(keys) > 1
-                else {keys[0]: idx}
-            )
-            changes.append({"key": key_dict, "timestamp": ts, "changes": diffs})
-
-    return new_df, drop_df, pd.DataFrame(changes)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 🎛 State & Snowpark connection
-# ──────────────────────────────────────────────────────────────────────────────
-def init_state() -> None:
+def init_state() -> Optional[Session]:
     """Initialise Streamlit session-state and Snowpark session."""
-    defaults: Dict[str, object] = dict(
-        selected_database_source="",
-        selected_schema_source="",
-        selected_table_source="",
-        selected_database_target="",
-        selected_schema_target="",
-        selected_table_target="",
-        join_key=[],
-        selected_columns=[],
-        new_records_df=pd.DataFrame(),
-        dropped_records_df=pd.DataFrame(),
-        changed_records_df=pd.DataFrame(),
-        column_diff_summary=pd.DataFrame(),
-        comparison_ran=False,
-    )
+    defaults = {
+        "selected_database_source": "",
+        "selected_schema_source": "",
+        "selected_table_source": "",
+        "selected_database_target": "",
+        "selected_schema_target": "",
+        "selected_table_target": "",
+        "join_key": [],
+        "comparison_ran": False,
+        "current_page": 0,
+        "total_pages": 0,
+        "diff_type": "new"
+    }
+
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
-    def reset_all() -> None:
-        for key in defaults:
-            st.session_state.pop(key, None)
-        st.session_state["comparison_ran"] = False
-
-    st.session_state["reset_all"] = reset_all
-
     if 'session' in st.session_state:
         return st.session_state.session
+
     try:
         session = Session.builder.getOrCreate()
     except Exception as e1:
@@ -172,7 +81,6 @@ def init_state() -> None:
             st.error(f"Failed to connect to Snowflake. Initial error: {e1}. Secondary error: {e2}")
             return None
 
-    # Ensure our download stage exists
     try:
         stage = STAGE_NAME.lstrip("@")
         session.sql(f"CREATE STAGE IF NOT EXISTS {stage}").collect()
@@ -182,6 +90,126 @@ def init_state() -> None:
     st.session_state.session = session
     return session
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 🚀 Snowflake Query Optimization
+# ──────────────────────────────────────────────────────────────────────────────
+def build_diff_query(
+        db_src: str,
+        sch_src: str,
+        tbl_src: str,
+        db_tgt: str,
+        sch_tgt: str,
+        tbl_tgt: str,
+        join_keys: List[str],
+        diff_type: str,
+        page: int = 0
+) -> str:
+    fq_src = f"{quote_identifier(db_src)}.{quote_identifier(sch_src)}.{quote_identifier(tbl_src)}"
+    fq_tgt = f"{quote_identifier(db_tgt)}.{quote_identifier(sch_tgt)}.{quote_identifier(tbl_tgt)}"
+
+    common_cols = utils.get_common_columns_optimized(
+        st.session_state.session,
+        db_src, sch_src, tbl_src,
+        db_tgt, sch_tgt, tbl_tgt
+    )
+
+    q_keys = [quote_identifier(k) for k in join_keys]
+    join_cond = " AND ".join([f"src.{k} = tgt.{k}" for k in q_keys])
+
+    # Deduplication logic - ensure distinct results
+    if diff_type == "new":
+        return f"""
+            SELECT DISTINCT tgt.* 
+            FROM {fq_tgt} tgt
+            LEFT JOIN {fq_src} src ON {join_cond}
+            WHERE {' AND '.join([f'src.{k} IS NULL' for k in q_keys])}
+            ORDER BY {", ".join([f"tgt.{k}" for k in q_keys])}
+            LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
+        """
+
+    elif diff_type == "dropped":
+        return f"""
+            SELECT DISTINCT src.* 
+            FROM {fq_src} src
+            LEFT JOIN {fq_tgt} tgt ON {join_cond}
+            WHERE {' AND '.join([f'tgt.{k} IS NULL' for k in q_keys])}
+            ORDER BY {", ".join([f"src.{k}" for k in q_keys])}
+            LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
+        """
+
+    elif diff_type == "changed":
+        non_key_cols = [quote_identifier(c) for c in common_cols if c not in join_keys]
+        comparisons = [f"src.{col} IS DISTINCT FROM tgt.{col}" for col in non_key_cols]
+
+        return f"""
+                WITH changed AS (
+                    SELECT src.*, tgt.*
+                    FROM {fq_src} src
+                    JOIN {fq_tgt} tgt ON {join_cond}
+                    WHERE {' OR '.join(comparisons)}
+                )
+                SELECT DISTINCT * FROM changed
+                ORDER BY {", ".join(q_keys)}
+                LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
+            """
+
+    return ""
+
+
+def get_diff_count(
+        db_src: str,
+        sch_src: str,
+        tbl_src: str,
+        db_tgt: str,
+        sch_tgt: str,
+        tbl_tgt: str,
+        join_keys: List[str],
+        diff_type: str
+) -> int:
+    """Get count of differences without loading full dataset"""
+    fq_src = f"{quote_identifier(db_src)}.{quote_identifier(sch_src)}.{quote_identifier(tbl_src)}"
+    fq_tgt = f"{quote_identifier(db_tgt)}.{quote_identifier(sch_tgt)}.{quote_identifier(tbl_tgt)}"
+
+    # Get common columns
+    common_cols = utils.get_common_columns_optimized(
+        st.session_state.session,
+        db_src, sch_src, tbl_src,
+        db_tgt, sch_tgt, tbl_tgt
+    )
+
+    # Build join condition
+    q_keys = [quote_identifier(k) for k in join_keys]
+    join_cond = " AND ".join([f"src.{k} = tgt.{k}" for k in q_keys])
+
+    # Deduplicated counts
+    if diff_type == "new":
+        query = f"""
+            SELECT COUNT(DISTINCT {", ".join([f"tgt.{k}" for k in q_keys])})
+            FROM {fq_tgt} tgt
+            LEFT JOIN {fq_src} src ON {join_cond}
+            WHERE {' AND '.join([f'src.{k} IS NULL' for k in q_keys])}
+        """
+    elif diff_type == "dropped":
+        query = f"""
+            SELECT COUNT(DISTINCT {", ".join([f"src.{k}" for k in q_keys])})
+            FROM {fq_src} src
+            LEFT JOIN {fq_tgt} tgt ON {join_cond}
+            WHERE {' AND '.join([f'tgt.{k} IS NULL' for k in q_keys])}
+        """
+    elif diff_type == "changed":
+        # Only compare non-key columns
+        non_key_cols = [quote_identifier(c) for c in common_cols if c not in join_keys]
+        comparisons = [f"src.{col} IS DISTINCT FROM tgt.{col}" for col in non_key_cols]
+
+        query = f"""
+            SELECT COUNT(DISTINCT {", ".join([f"src.{k}" for k in q_keys])})
+            FROM {fq_src} src
+            JOIN {fq_tgt} tgt ON {join_cond}
+            WHERE {' OR '.join(comparisons)}
+        """
+
+    result = st.session_state.session.sql(query).collect()
+    return result[0][0] if result else 0
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 🖥 Sidebar – database / table / key selectors
@@ -189,14 +217,14 @@ def init_state() -> None:
 def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
     """Render sidebar controls and return the 'Compare' button state + IDs."""
     sess = st.session_state.session
-    if sess is None:
+    if not sess:
         st.sidebar.error("⛔️ No Snowpark session; initialise connection.")
         return False, ("",) * 6
 
     with st.sidebar:
-        # (logo & UI identical to Step-1)
+        # Logo
         try:
-            with open("logo.png", "rb") as f:
+            with open("dxrx_logo.png", "rb") as f:
                 st.image(f.read(), width=100)
         except Exception:
             st.warning("⚠️ Logo not found or cannot be loaded.")
@@ -206,30 +234,20 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
         dbs = [""] + [r[1] for r in sess.sql("SHOW DATABASES").collect()]
         db_src = st.selectbox("Database (source)", dbs, key="selected_database_source")
 
-        schs = (
-            [""]
-            + [r[1] for r in sess.sql(f"SHOW SCHEMAS IN DATABASE {db_src}").collect()]
-            if db_src
-            else []
-        )
+        schs = [""] + [r[1] for r in sess.sql(f"SHOW SCHEMAS IN DATABASE {db_src}").collect()] if db_src else []
         sch_src = st.selectbox("Schema (source)", schs, key="selected_schema_source", disabled=not db_src)
 
-        tbls = (
-            [""]
-            + [
-                r[0]
-                for r in sess.sql(
-                    f"SELECT TABLE_NAME FROM {db_src}.INFORMATION_SCHEMA.TABLES "
-                    f"WHERE TABLE_SCHEMA='{sch_src}'"
-                ).collect()
-            ]
-            if sch_src
-            else []
-        )
+        tbls = [""] + [
+            r[0] for r in sess.sql(
+                f"SELECT TABLE_NAME FROM {db_src}.INFORMATION_SCHEMA.TABLES "
+                f"WHERE TABLE_SCHEMA='{sch_src}'"
+            ).collect()
+        ] if sch_src else []
         tsrc = st.selectbox("Table (source)", tbls, key="selected_table_source", disabled=not sch_src)
+
         if st.button("🔄 Reset Source Table"):
             for k in ("selected_database_source", "selected_schema_source", "selected_table_source"):
-                st.session_state.pop(k, None)
+                st.session_state[k] = ""
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -237,30 +255,20 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
         st.header("🎯 Target Table")
         db_tgt = st.selectbox("Database (target)", dbs, key="selected_database_target")
 
-        schs_t = (
-            [""]
-            + [r[1] for r in sess.sql(f"SHOW SCHEMAS IN DATABASE {db_tgt}").collect()]
-            if db_tgt
-            else []
-        )
+        schs_t = [""] + [r[1] for r in sess.sql(f"SHOW SCHEMAS IN DATABASE {db_tgt}").collect()] if db_tgt else []
         sch_tgt = st.selectbox("Schema (target)", schs_t, key="selected_schema_target", disabled=not db_tgt)
 
-        tbls_t = (
-            [""]
-            + [
-                r[0]
-                for r in sess.sql(
-                    f"SELECT TABLE_NAME FROM {db_tgt}.INFORMATION_SCHEMA.TABLES "
-                    f"WHERE TABLE_SCHEMA='{sch_tgt}'"
-                ).collect()
-            ]
-            if sch_tgt
-            else []
-        )
+        tbls_t = [""] + [
+            r[0] for r in sess.sql(
+                f"SELECT TABLE_NAME FROM {db_tgt}.INFORMATION_SCHEMA.TABLES "
+                f"WHERE TABLE_SCHEMA='{sch_tgt}'"
+            ).collect()
+        ] if sch_tgt else []
         tgt = st.selectbox("Table (target)", tbls_t, key="selected_table_target", disabled=not sch_tgt)
+
         if st.button("🔄 Reset Target Table"):
             for k in ("selected_database_target", "selected_schema_target", "selected_table_target"):
-                st.session_state.pop(k, None)
+                st.session_state[k] = ""
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -268,24 +276,9 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
         st.header("🔗 Join Key(s)")
         st.caption("Pick one or more columns to form the composite key.")
 
-        cols = (
-            [
-                r[0]
-                for r in sess.sql(
-                    f"SELECT COLUMN_NAME FROM {db_src}.INFORMATION_SCHEMA.COLUMNS "
-                    f"WHERE TABLE_SCHEMA='{sch_src}' AND TABLE_NAME='{tsrc}' "
-                    f"ORDER BY ORDINAL_POSITION"
-                ).collect()
-            ]
-            if tsrc
-            else []
-        )
+        cols = utils.get_table_columns(sess, db_src, sch_src, tsrc) if tsrc else []
 
         default_keys = st.session_state.get("join_key", [])
-        if not isinstance(default_keys, list):
-            default_keys = []
-        default_keys = [k for k in default_keys if k in cols]
-
         st.multiselect(
             label="Join key(s)",
             options=cols,
@@ -296,162 +289,205 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
 
         # Buttons
         if st.button("🔄 Reset All"):
-            st.session_state.reset_all()
+            for key in list(st.session_state.keys()):
+                if key not in ["session"]:
+                    st.session_state[key] = ""
+            st.session_state["join_key"] = []
+            st.session_state["comparison_ran"] = False
 
         valid = all(
             [db_src, sch_src, tsrc, db_tgt, sch_tgt, tgt, len(st.session_state.join_key) > 0]
         )
         st.markdown("<br>", unsafe_allow_html=True)
+        valid = all([db_src, sch_src, tsrc, db_tgt, sch_tgt, tgt, len(st.session_state.join_key) > 0])
         run_btn = st.button("🔍 Compare Tables", disabled=not valid)
 
     return run_btn, (db_src, sch_src, tsrc, db_tgt, sch_tgt, tgt)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 📥 Result helpers (download anchors unchanged)
-# ──────────────────────────────────────────────────────────────────────────────
-def _data_uri(data: bytes, filename: str, mime: str) -> str:
-    b64 = base64.b64encode(data).decode()
-    return (
-        f'<a download="{html.escape(filename, quote=True)}" '
-        f'href="data:{mime};base64,{b64}">📥 {html.escape(filename)}</a>'
-    )
-
-def _presigned_link(sess, data: bytes, filename: str, mime: str) -> str:
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(data)
-        tmp_path = tmp.name
-    sess.file.put(tmp_path, STAGE_NAME, overwrite=True)
-    url = sess.sql(
-        f"SELECT GET_PRESIGNED_URL('{STAGE_NAME}','{os.path.basename(tmp_path)}')"
-    ).collect()[0][0]
-    return (
-        f'<a target="_blank" rel="noopener noreferrer" href="{html.escape(url, True)}">'
-        f'📥 {html.escape(filename)}</a>'
-    )
-
-def _download_anchor(sess, data: bytes, filename: str, mime: str) -> str:
-    # Always try data-URI for small payloads,
-    # otherwise attempt presigned-link but fall back if that errors.
-    if len(data) <= MAX_EMBED_SIZE:
-        return _data_uri(data, filename, mime)
-    try:
-        return _presigned_link(sess, data, filename, mime)
-    except Exception:
-        # Fallback to data-URI if presigned link fails
-        # e.g. stage not authorized or missing
-        return _data_uri(data, filename, mime)
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # 🖼 Results renderer
 # ──────────────────────────────────────────────────────────────────────────────
-def render_results() -> None:
+def render_results(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt):
+    """Render comparison results with pagination and graph/table views"""
+    sess = st.session_state.session
+    join_keys = st.session_state.join_key
+    diff_type = st.session_state.get("diff_type", "new")
+    current_page = st.session_state.get("current_page", 0)
+
+    # Get counts
+    new_count = get_diff_count(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt, join_keys, "new")
+    dropped_count = get_diff_count(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt, join_keys, "dropped")
+    changed_count = get_diff_count(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt, join_keys, "changed")
+
+    # Calculate total pages for current diff type
+    total_count = {
+        "new": new_count,
+        "dropped": dropped_count,
+        "changed": changed_count
+    }[diff_type]
+
+    total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
+    st.session_state.total_pages = total_pages
+
+    # Build and execute query
+    query = build_diff_query(
+        db_src, sch_src, tbl_src,
+        db_tgt, sch_tgt, tbl_tgt,
+        join_keys, diff_type, current_page
+    )
+
+    with st.spinner(f"Fetching {diff_type} records..."):
+        df = sess.sql(query).to_pandas()
+
+    # Display results
     st.success("✅ Comparison complete")
 
-    # 1️⃣ Cache payloads
-    def _cache_bytes(state_key: str, df: pd.DataFrame) -> None:
-        if state_key not in st.session_state:
-            st.session_state[state_key] = df.to_csv(index=False).encode()
-            st.session_state[state_key.replace("_bytes", "_json_bytes")] = json.dumps(
-                df.to_dict(orient="records"), indent=2, default=str
-            ).encode()
-
-    _cache_bytes("col_summary_bytes",  st.session_state.column_diff_summary)
-    _cache_bytes("new_rows_bytes",     st.session_state.new_records_df)
-    _cache_bytes("dropped_rows_bytes", st.session_state.dropped_records_df)
-
-    if "changed_rows_bytes" not in st.session_state:
-        st.session_state.changed_rows_bytes = json.dumps(
-            st.session_state.changed_records_df.to_dict(orient="records"),
-            indent=2,
-            default=str,
-        ).encode()
-
-    sess = st.session_state.session
-
-    # 2️⃣ Column summary
-    st.subheader("📊 Column-level summary")
+    # Create tabs for table and graph views
     tab1, tab2 = st.tabs(["📋 Table View", "📈 Graph View"])
 
-    # ➕ Metrics
     with tab1:
-        st.dataframe(st.session_state.column_diff_summary, use_container_width=True)
-
-        st.markdown(
-            _download_anchor(sess, st.session_state.col_summary_bytes, "column_summary.csv", "text/csv"),
-            unsafe_allow_html=True,
+        # Column summary
+        st.subheader("📊 Column-level summary")
+        col_summary = utils.summarise_column_diffs_optimized(
+            sess,
+            db_src, sch_src, tbl_src,
+            db_tgt, sch_tgt, tbl_tgt
         )
-        st.markdown(
-            _download_anchor(sess, st.session_state.col_summary_json_bytes, "column_summary.json", "application/json"),
-            unsafe_allow_html=True,
-        )
+        st.dataframe(col_summary)
 
-        # 3️⃣ Metrics row
-        new_ct     = len(st.session_state.new_records_df)
-        dropped_ct = len(st.session_state.dropped_records_df)
-        changed_ct = len(st.session_state.changed_records_df)
-
+        # Metrics
         n, d, c = st.columns(3)
-        n.metric("New rows",     new_ct)
-        d.metric("Dropped rows", dropped_ct)
-        c.metric("Changed rows", changed_ct)
+        n.metric("New rows", new_count)
+        d.metric("Dropped rows", dropped_count)
+        c.metric("Changed rows", changed_count)
 
-        # 4️⃣ Downloads + expanders
-        if new_ct:
-            st.markdown(
-                _download_anchor(sess, st.session_state.new_rows_bytes, "new_rows.csv", "text/csv"),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                _download_anchor(sess, st.session_state.new_rows_json_bytes, "new_rows.json", "application/json"),
-                unsafe_allow_html=True,
-            )
-            with st.expander("🆕 New records", expanded=False):
-                st.dataframe(st.session_state.new_records_df.head(MAX_ROWS), use_container_width=True)
+        # Diff type selector
+        diff_options = {
+            "new": f"New Records ({new_count})",
+            "dropped": f"Dropped Records ({dropped_count})",
+            "changed": f"Changed Records ({changed_count})"
+        }
+        selected_diff = st.selectbox("Select difference type", options=list(diff_options.keys()),
+                                     format_func=lambda x: diff_options[x],
+                                     key="diff_type_selector")
 
-        if dropped_ct:
-            st.markdown(
-                _download_anchor(sess, st.session_state.dropped_rows_bytes, "dropped_rows.csv", "text/csv"),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                _download_anchor(sess, st.session_state.dropped_rows_json_bytes, "dropped_rows.json", "application/json"),
-                unsafe_allow_html=True,
-            )
-            with st.expander("🗑️ Dropped records", expanded=False):
-                st.dataframe(st.session_state.dropped_records_df.head(MAX_ROWS), use_container_width=True)
+        if selected_diff != diff_type:
+            st.session_state.diff_type = selected_diff
+            st.session_state.current_page = 0
+            st.rerun()
 
-        if changed_ct:
-            st.markdown(
-                _download_anchor(sess, st.session_state.changed_rows_bytes, "changed_rows.json", "application/json"),
-                unsafe_allow_html=True,
-            )
-            with st.expander("🔄 Changed records – diffs", expanded=False):
-                st.json(st.session_state.changed_records_df.to_dict(orient="records"))
+        # Display current diff type
+        st.subheader(diff_options[selected_diff])
 
-    # 📊 Chart (built-in)
+        if not df.empty:
+            # Calculate row range for display
+            start_row = current_page * PAGE_SIZE + 1
+            end_row = min((current_page + 1) * PAGE_SIZE, total_count)
+            if end_row > total_count:
+                end_row = total_count
+
+            st.dataframe(df)
+
+            # Pagination controls with manual input
+            col1, col2, col3, col4, col5 = st.columns([1, 2, 1, 3, 2])
+
+            with col1:
+                if st.button("⬅️ Previous", disabled=(current_page == 0)):
+                    st.session_state.current_page -= 1
+                    st.rerun()
+
+            with col2:
+                st.markdown(
+                    f"**Page {current_page + 1} of {total_pages}**  \n"
+                    f"Rows **{start_row} - {end_row}** of **{total_count}**"
+                )
+
+            with col3:
+                if st.button("Next ➡️", disabled=(current_page >= total_pages - 1)):
+                    st.session_state.current_page += 1
+                    st.rerun()
+
+            with col4:
+                new_page = st.number_input(
+                    "Go to page:",
+                    min_value=1,
+                    max_value=total_pages,
+                    value=current_page + 1,
+                    step=1,
+                    format="%d"
+                )
+
+            with col5:
+                if st.button("Jump"):
+                    if 1 <= new_page <= total_pages:
+                        st.session_state.current_page = new_page - 1
+                        st.rerun()
+
+            # Export buttons with descriptive filenames
+            st.divider()
+            st.subheader("Export Results")
+            export_col1, export_col2 = st.columns(2)
+
+            # Map diff types to filename components
+            filename_map = {
+                "new": "new-records",
+                "dropped": "dropped-records",
+                "changed": "changed-records"
+            }
+            filename_base = filename_map.get(diff_type, "comparison-results")
+
+            with export_col1:
+                csv = df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "💾 Download CSV",
+                    data=csv,
+                    file_name=f"{filename_base}.csv",
+                    mime="text/csv"
+                )
+
+            with export_col2:
+                json_data = df.to_json(orient="records", indent=2)
+                st.download_button(
+                    "📥 Download JSON",
+                    data=json_data,
+                    file_name=f"{filename_base}.json",
+                    mime="application/json"
+                )
+        else:
+            st.info(f"No {selected_diff.replace('_', ' ')} found")
+
     with tab2:
-        col1, col2 = st.columns(2)
+        # Graph view
+        st.subheader("📊 Summary Visualization")
 
-        # ➕ Metrics
-        with col1:
-            new_ct     = len(st.session_state.new_records_df)
-            dropped_ct = len(st.session_state.dropped_records_df)
-            changed_ct = len(st.session_state.changed_records_df)
+        # Create summary data for the bar chart
+        summary_data = pd.DataFrame({
+            "Change Type": ["New", "Dropped", "Changed"],
+            "Count": [new_count, dropped_count, changed_count]
+        })
 
-            st.metric("New Rows", new_ct)
-            st.metric("Dropped Rows", dropped_ct)
-            st.metric("Changed Rows", changed_ct)
+        # Bar chart visualization
+        st.bar_chart(summary_data.set_index("Change Type"))
 
-        # 📊 Chart (built-in)
-        with col2:
-            chart_data = pd.DataFrame({
-                "Change Type": ["New", "Dropped", "Changed"],
-                "Count": [new_ct, dropped_ct, changed_ct]
-            })
-            st.bar_chart(chart_data.set_index("Change Type"))
+        # Additional metrics display
+        st.subheader("📈 Detailed Metrics")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("New Rows", new_count, delta_color="off")
+        col2.metric("Dropped Rows", dropped_count, delta_color="off")
+        col3.metric("Changed Rows", changed_count, delta_color="off")
 
+        # Pie chart for proportion visualization
+        if (new_count + dropped_count + changed_count) > 0:
+            st.subheader("🧩 Change Proportions")
+            pie_data = summary_data.copy()
+            pie_data["Percentage"] = pie_data["Count"] / (new_count + dropped_count + changed_count) * 100
+            pie_data = pie_data[pie_data["Count"] > 0]  # Filter out zero counts
+
+            if not pie_data.empty:
+                st.write("Distribution of changes:")
+                st.dataframe(pie_data[["Change Type", "Count", "Percentage"]].round(1))
+            else:
+                st.info("No changes found between the tables")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 🔗 Main
@@ -460,120 +496,23 @@ def main() -> None:
     st.set_page_config(page_title="Cohort Comparison Tool – PoC", page_icon="🧪", layout="wide")
     st.title("Cohort Comparison Tool 🧬🚀 – PoC")
 
-    init_state()
-    clicked, ids = render_sidebar()
-
-    # First-run helper text
-    if not st.session_state.comparison_ran and not clicked:
-        st.markdown(
-            """
-            **How to use:**  
-            1. Pick **Source** & **Target** tables (they *can* live in different DB/schemas).  
-            2. Select one or more **Join Key** columns present in *both* tables.  
-            3. Click **Compare Tables**.  
-               * If schemas match ➜ full comparison.  
-               * If schemas differ ➜ only shared columns are compared.
-            """,
-            unsafe_allow_html=True,
-        )
+    session = init_state()
+    if not session:
+        st.error("❌ Failed to initialize Snowflake session")
         return
 
-    # Run comparison
+    clicked, ids = render_sidebar()
+    db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt = ids
+
     if clicked:
-        db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt = ids
-        sess = st.session_state.session
+        st.session_state.comparison_ran = True
+        st.session_state.current_page = 0
+        st.session_state.diff_type = "new"
+        st.cache_data.clear()
 
-        with st.spinner("🔄 Fetching & computing diffs…"):
-            # ───── Init progress bar ───────────────────────────────────────────
-            progress_placeholder = st.empty()
-            progress_bar = progress_placeholder.progress(0)
-
-            # ── 1) Fetch tables ────────────────────────────────────────────────
-            t0 = time.time()
-            df_base_raw = fetch_table(sess, db_src, sch_src, tbl_src)
-            progress_bar.progress(10)
-
-            df_target_raw = fetch_table(sess, db_tgt, sch_tgt, tbl_tgt)
-            progress_bar.progress(20)
-
-            st.info(
-                f"✅ Fetched tables in {time.time() - t0:.2f}s "
-                f"(rows: source={len(df_base_raw):,}, target={len(df_target_raw):,})"
-            )
-            progress_bar.progress(30)
-
-            # ── 2) Column intersection + validation ─────────────────────────────
-            common_cols = utils.get_common_columns(df_base_raw, df_target_raw)
-            if not common_cols:
-                progress_placeholder.empty()
-                st.error("❌ No matching columns between the two tables – nothing to compare.")
-                return
-            progress_bar.progress(40)
-
-            missing_keys = [k for k in st.session_state.join_key if k not in common_cols]
-            if missing_keys:
-                progress_placeholder.empty()
-                st.error(f"❌ Selected join key(s) {missing_keys} not found in both tables.")
-                st.info(f"❗️ Please pick a key that exists in both tables and try again.")
-                return
-            progress_bar.progress(50)
-
-            # ── 3) Column selection for differing schemas ───────────────────────
-            if not compare_schemas_strict(df_base_raw, df_target_raw):
-                # remove bar when we show the “schemas differ” info
-                progress_placeholder.empty()
-                st.info("ℹ️ Schemas differ – comparing only shared columns.")
-                cols_to_keep = st.session_state.join_key + [
-                    c for c in common_cols if c not in st.session_state.join_key
-                ]
-                df_base = df_base_raw[cols_to_keep]
-                df_target = df_target_raw[cols_to_keep]
-            else:
-                st.success("✅ Schemas are identical – performing full column comparison.")
-                df_base = df_base_raw
-                df_target = df_target_raw
-            progress_bar.progress(70)
-
-            # ── 4) Row-count guard ─────────────────────────────────────────────
-            if len(df_base) > MAX_ROWS or len(df_target) > MAX_ROWS:
-                progress_placeholder.empty()
-                st.warning(f"⚠️ Large tables (> {MAX_ROWS:,} rows) may take longer.")
-                if len(df_base) == MAX_LIMIT or len(df_target) == MAX_LIMIT:
-                    st.warning(
-                        f"⚠️ One of the tables has exceeded {MAX_LIMIT:,} rows, "
-                        "which may lead to performance issues. "
-                        "Consider filtering by choosing more than one join key for narrow search."
-                    )
-            progress_bar.progress(80)
-
-            # ── 5) Compute diffs ────────────────────────────────────────────────
-            try:
-                new_df, drop_df, change_df = compute_diffs(
-                    df_base, df_target, st.session_state.join_key
-                )
-            except ValueError as e:
-                progress_placeholder.empty()
-                st.error(f"❌ {e}")
-                return
-            progress_bar.progress(90)
-
-            # ── 6) Store & summarise ───────────────────────────────────────────
-            st.session_state.new_records_df      = new_df
-            st.session_state.dropped_records_df  = drop_df
-            st.session_state.changed_records_df  = change_df
-            st.session_state.column_diff_summary = utils.summarise_column_diffs(df_base, df_target)
-            st.session_state.comparison_ran      = True
-
-            # ── 7) Finish & clear bar ──────────────────────────────────────────
-            progress_bar.progress(100)
-            progress_placeholder.empty()
-
-        render_results()
-
-    # Keep results on rerun
-    elif st.session_state.comparison_ran:
-        render_results()
-
+    if st.session_state.comparison_ran:
+        with st.spinner("Running comparison..."):
+            render_results(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt)
 
 if __name__ == "__main__":
     main()
