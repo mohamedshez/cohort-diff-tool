@@ -119,39 +119,60 @@ def build_diff_query(
     # Deduplication logic - ensure distinct results
     if diff_type == "new":
         return f"""
-            SELECT DISTINCT tgt.* 
-            FROM {fq_tgt} tgt
-            LEFT JOIN {fq_src} src ON {join_cond}
-            WHERE {' AND '.join([f'src.{k} IS NULL' for k in q_keys])}
-            ORDER BY {", ".join([f"tgt.{k}" for k in q_keys])}
-            LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
+        SELECT
+          tgt.*
+        FROM {fq_tgt} AS tgt
+        LEFT JOIN {fq_src} AS src
+          ON {join_cond}
+        WHERE src.{q_keys[0]} IS NULL
+        QUALIFY
+          ROW_NUMBER()
+            OVER (
+              PARTITION BY {", ".join([f"tgt.{k}" for k in q_keys])}
+              ORDER BY tgt.INGESTION_DATE DESC
+            ) = 1
+        ORDER BY {", ".join([f"tgt.{k}" for k in q_keys])}
+        LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
         """
 
     elif diff_type == "dropped":
         return f"""
-            SELECT DISTINCT src.* 
-            FROM {fq_src} src
-            LEFT JOIN {fq_tgt} tgt ON {join_cond}
-            WHERE {' AND '.join([f'tgt.{k} IS NULL' for k in q_keys])}
-            ORDER BY {", ".join([f"src.{k}" for k in q_keys])}
-            LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
+        SELECT
+          src.*
+        FROM {fq_src} AS src
+        LEFT JOIN {fq_tgt} AS tgt
+          ON {join_cond}
+        WHERE tgt.{q_keys[0]} IS NULL
+        QUALIFY
+          ROW_NUMBER()
+            OVER (
+              PARTITION BY {", ".join([f"src.{k}" for k in q_keys])}
+              ORDER BY src.INGESTION_DATE DESC
+            ) = 1
+        ORDER BY {", ".join([f"src.{k}" for k in q_keys])}
+        LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
         """
 
     elif diff_type == "changed":
         non_key_cols = [quote_identifier(c) for c in common_cols if c not in join_keys]
-        comparisons = [f"src.{col} IS DISTINCT FROM tgt.{col}" for col in non_key_cols]
+        comparisons  = " OR ".join([f"src.{col} IS DISTINCT FROM tgt.{col}" for col in non_key_cols])
 
         return f"""
-                WITH changed AS (
-                    SELECT src.*, tgt.*
-                    FROM {fq_src} src
-                    JOIN {fq_tgt} tgt ON {join_cond}
-                    WHERE {' OR '.join(comparisons)}
-                )
-                SELECT DISTINCT * FROM changed
-                ORDER BY {", ".join(q_keys)}
-                LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
-            """
+        SELECT
+          src.*
+        FROM {fq_src} AS src
+        JOIN {fq_tgt} AS tgt
+          ON {join_cond}
+        WHERE {comparisons}
+        QUALIFY
+          ROW_NUMBER()
+            OVER (
+              PARTITION BY {", ".join([f"src.{k}" for k in q_keys])}
+              ORDER BY src.INGESTION_DATE DESC
+            ) = 1
+        ORDER BY {", ".join([f"src.{k}" for k in q_keys])}
+        LIMIT {PAGE_SIZE} OFFSET {page * PAGE_SIZE}
+        """
 
     return ""
 
