@@ -91,7 +91,7 @@ def init_state() -> Optional[Session]:
     return session
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 🚀 Snowflake Query Optimization
+# 🚀 Snowflake Query Optimisation
 # ──────────────────────────────────────────────────────────────────────────────
 def build_diff_query(
         db_src: str,
@@ -458,7 +458,7 @@ def render_results(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt):
 
     with tab2:
         # Graph view
-        st.subheader("📊 Summary Visualization")
+        st.subheader("📊 Summary Visualisation")
 
         # Create summary data for the bar chart
         summary_data = pd.DataFrame({
@@ -466,7 +466,7 @@ def render_results(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt):
             "Count": [new_count, dropped_count, changed_count]
         })
 
-        # Bar chart visualization
+        # Bar chart visualisation
         st.bar_chart(summary_data.set_index("Change Type"))
 
         # Additional metrics display
@@ -476,7 +476,7 @@ def render_results(db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt):
         col2.metric("Dropped Rows", dropped_count, delta_color="off")
         col3.metric("Changed Rows", changed_count, delta_color="off")
 
-        # Pie chart for proportion visualization
+        # Pie chart for proportion visualisation
         if (new_count + dropped_count + changed_count) > 0:
             st.subheader("🧩 Change Proportions")
             pie_data = summary_data.copy()
