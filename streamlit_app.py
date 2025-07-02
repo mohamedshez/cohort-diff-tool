@@ -28,9 +28,6 @@ from utils import quote_identifier
 # ──────────────────────────────────────────────────────────────────────────────
 # 🔧 Constants & settings
 # ──────────────────────────────────────────────────────────────────────────────
-MAX_ROWS = 1_000
-MAX_EMBED_SIZE = 2_000_000
-MAX_LIMIT = 1_000_000
 STAGE_NAME = "@streamlit_downloads"
 PAGE_SIZE = 100  # Pagination size for results
 
@@ -233,6 +230,32 @@ def get_diff_count(
     return result[0][0] if result else 0
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 🔄 Reset callback functions - Clear session state for specific tables or all
+# ──────────────────────────────────────────────────────────────────────────────
+def reset_source_table():
+    st.session_state.selected_database_source = ""
+    st.session_state.selected_schema_source = ""
+    st.session_state.selected_table_source = ""
+    st.session_state.join_key = []
+
+def reset_target_table():
+    st.session_state.selected_database_target = ""
+    st.session_state.selected_schema_target = ""
+    st.session_state.selected_table_target = ""
+    st.session_state.join_key = []
+
+def reset_all():
+    reset_keys = [
+        "selected_database_source", "selected_schema_source", "selected_table_source",
+        "selected_database_target", "selected_schema_target", "selected_table_target",
+        "join_key", "comparison_ran", "current_page", "total_pages", "diff_type"
+    ]
+    for key in reset_keys:
+        if key in st.session_state:
+            del st.session_state[key]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 🖥 Sidebar – database / table / key selectors
 # ──────────────────────────────────────────────────────────────────────────────
 def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
@@ -266,9 +289,10 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
         ] if sch_src else []
         tsrc = st.selectbox("Table (source)", tbls, key="selected_table_source", disabled=not sch_src)
 
-        if st.button("🔄 Reset Source Table"):
-            for k in ("selected_database_source", "selected_schema_source", "selected_table_source"):
-                st.session_state[k] = ""
+        # Reset Source Table button
+        st.button("🔄 Reset Source Table",
+                  on_click=reset_source_table,
+                  key="reset_source_button")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -287,9 +311,10 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
         ] if sch_tgt else []
         tgt = st.selectbox("Table (target)", tbls_t, key="selected_table_target", disabled=not sch_tgt)
 
-        if st.button("🔄 Reset Target Table"):
-            for k in ("selected_database_target", "selected_schema_target", "selected_table_target"):
-                st.session_state[k] = ""
+        # Reset Target Table button
+        st.button("🔄 Reset Target Table",
+                  on_click=reset_target_table,
+                  key="reset_target_button")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -308,13 +333,10 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
             help="One or more columns that uniquely identify each row",
         )
 
-        # Buttons
-        if st.button("🔄 Reset All"):
-            for key in list(st.session_state.keys()):
-                if key not in ["session"]:
-                    st.session_state[key] = ""
-            st.session_state["join_key"] = []
-            st.session_state["comparison_ran"] = False
+        # Reset All button
+        st.button("🔄 Reset All",
+                  on_click=reset_all,
+                  key="reset_all_button")
 
         valid = all(
             [db_src, sch_src, tsrc, db_tgt, sch_tgt, tgt, len(st.session_state.join_key) > 0]
