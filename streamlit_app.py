@@ -545,6 +545,7 @@ def main() -> None:
         return
 
     clicked, ids = render_sidebar()
+    db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt = ids
 
     # Show instructions until first run
     if not clicked:
@@ -561,8 +562,6 @@ def main() -> None:
             unsafe_allow_html=True,
         )
         return
-
-    db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt = ids
 
     if clicked:
         st.session_state.comparison_ran = True
