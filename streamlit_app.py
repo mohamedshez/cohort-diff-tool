@@ -545,6 +545,23 @@ def main() -> None:
         return
 
     clicked, ids = render_sidebar()
+
+    # Show instructions until first run
+    if not clicked:
+        st.markdown(
+            """
+            **At a Glance:**  
+            • Select the **Source** & the **Target** tables via `Database` → `Schema` → `Table`.  
+            • Pick one or more **Join Key(s)** columns.  
+            • Click **Compare Tables** to compute diffs:
+              - New rows  
+              - Dropped rows  
+              - Changed rows with JSON change summary
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
     db_src, sch_src, tbl_src, db_tgt, sch_tgt, tbl_tgt = ids
 
     if clicked:
