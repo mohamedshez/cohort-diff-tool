@@ -190,7 +190,7 @@ def render_sidebar() -> Tuple[bool, Tuple[str, str, str, str, str, str]]:
     with st.sidebar:
         # Display logo above sidebar via binary to avoid file path issues
         try:
-            with open("dxrx_logo.png", "rb") as f:
+            with open("logo.png", "rb") as f:
                 st.image(f.read(), width=100)
         except Exception:
             st.warning("⚠️ Logo not found or cannot be loaded.")
